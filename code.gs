@@ -171,17 +171,90 @@ function prioritizeTasksWithAI(config, availability, tasks) {
   return callOpenAI(prompt);
 }
 
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatInlineMarkdown(text) {
+  // Convert markdown bold to HTML bold.
+  return text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+}
+
+function markdownToHtml(markdown) {
+  const lines = (markdown || "").split(/\r?\n/);
+  const html = [];
+  let inList = false;
+
+  lines.forEach(rawLine => {
+    const line = rawLine.trim();
+
+    if (!line) {
+      if (inList) {
+        html.push("</ul>");
+        inList = false;
+      }
+      return;
+    }
+
+    const bulletMatch = line.match(/^[-*]\s+(.*)$/);
+    if (bulletMatch) {
+      if (!inList) {
+        html.push("<ul>");
+        inList = true;
+      }
+      html.push(`<li>${formatInlineMarkdown(escapeHtml(bulletMatch[1]))}</li>`);
+      return;
+    }
+
+    if (inList) {
+      html.push("</ul>");
+      inList = false;
+    }
+    html.push(`<p>${formatInlineMarkdown(escapeHtml(line))}</p>`);
+  });
+
+  if (inList) {
+    html.push("</ul>");
+  }
+
+  return html.join("\n");
+}
+
+function markdownToPlainText(markdown) {
+  return (markdown || "")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/^[-*]\s+/gm, "- ");
+}
+
 function sendCoachEmail(recipient, aiContent, availability) {
-  const subject = `🚀 Your Daily Career Coach: ${new Date().toLocaleDateString()}`;
-  const body = `
-    Good morning! 
-    
-    Today you have ${availability.totalMinutes} minutes of "White Space" across your calendars.
-    
-    ${aiContent}
-    
-    Go get 'em!
-  `;
-  
-  GmailApp.sendEmail(recipient, subject, body);
+  const subjectDate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MMM d, yyyy");
+  const subject = `Your Daily Career Coach: ${subjectDate}`;
+  const aiPlain = markdownToPlainText(aiContent).trim();
+  const aiHtml = markdownToHtml(aiContent);
+
+  const plainBody = [
+    "Good morning!",
+    "",
+    `Today you have ${availability.totalMinutes} minutes of White Space across your calendars.`,
+    "",
+    aiPlain,
+    "",
+    "Go get 'em!"
+  ].join("\n");
+
+  const htmlBody = [
+    "<div style=\"font-family:Arial,sans-serif;line-height:1.5;color:#222;\">",
+    "<p><strong>Good morning!</strong></p>",
+    `<p>Today you have <strong>${availability.totalMinutes} minutes</strong> of White Space across your calendars.</p>`,
+    aiHtml,
+    "<p>Go get &#39;em!</p>",
+    "</div>"
+  ].join("\n");
+
+  GmailApp.sendEmail(recipient, subject, plainBody, { htmlBody: htmlBody });
 }
