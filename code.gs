@@ -21,7 +21,12 @@ function runDailyCoach() {
     throw new Error("Could not find WORK_START or WORK_END in Column B. Check spelling!");
   }
 
-  // 2. Calculate White Space
+  // --- NEW STEP ---
+  // 2.1 Update French progress from yesterday's calendar before doing anything else
+  updateFrenchProgress(config);
+  // ----------------
+
+  // 2.2 Calculate White Space
   const availability = getDailyAvailability(config);
   
   // 3. Get OKRs
@@ -32,6 +37,56 @@ function runDailyCoach() {
   
   // 5. Send the Email
   sendCoachEmail(config.USER_EMAIL, aiContent, availability);
+}
+
+/**
+ * Updates the French OKR running count based on yesterday's calendar events.
+ */
+function updateFrenchProgress(config) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const okrSheet = SpreadsheetApp.openById(config.OKR_SHEET_ID).getSheetByName(config.OKR_TAB_NAME);
+  
+  // 1. Define Yesterday's Range
+  let yesterdayStart = new Date();
+  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  yesterdayStart.setHours(0, 0, 0, 0);
+  
+  let yesterdayEnd = new Date();
+  yesterdayEnd.setDate(yesterdayEnd.getDate() - 1);
+  yesterdayEnd.setHours(23, 59, 59, 999);
+
+  // 2. Fetch Events from your Main Calendar
+  // Assuming 'primary' or the specific ID for your French/Life calendar
+  const calendar = CalendarApp.getDefaultCalendar(); 
+  const events = calendar.getEvents(yesterdayStart, yesterdayEnd);
+  
+  let newHours = 0;
+  const keywords = ["FLE", "PMF", "pmf", "Soignant d'aide", "Pâtisserie"];
+
+  events.forEach(event => {
+    const title = event.getTitle();
+    if (keywords.some(key => title.includes(key))) {
+      let durationInHours = (event.getEndTime() - event.getStartTime()) / (1000 * 60 * 60);
+      newHours += durationInHours;
+    }
+  });
+
+  if (newHours === 0) return; // No French classes yesterday, skip update.
+
+  // 3. Find the "French Classes" row and update Running Count
+  const data = okrSheet.getDataRange().getValues();
+  const headers = data[0];
+  const idxKR = headers.indexOf("Key Results");
+  const idxRun = headers.indexOf("Running Count");
+
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][idxKR].toString().includes("Attend hrs of classes / month")) {
+      let currentCount = parseFloat(data[i][idxRun]) || 0;
+      okrSheet.getRange(i + 1, idxRun + 1).setValue(currentCount + newHours);
+      Logger.log(`Added ${newHours} hours to French OKR. New Total: ${currentCount + newHours}`);
+      break;
+    }
+  }
 }
 
 function getDailyAvailability(config) {
@@ -153,20 +208,23 @@ function callOpenAI(prompt) {
 
 function prioritizeTasksWithAI(config, availability, tasks) {
   // Format OKRs for the prompt
-  const okrSummary = tasks.map(t => `- ${t.name} (Requires: ${t.effort} mins)`).join('\n');
-  
-  const prompt = `
-    Today I have ${availability.totalMinutes} minutes of total free time. 
-    My largest contiguous focus block is ${availability.largestBlock} minutes.
+  const okrSummary = tasks.map(t => 
+      `- ${t.name}: ${t.unitsLeft} units remaining (Total effort left: ${t.totalEffortLeft} mins)`
+    ).join('\n');
     
-    Based on my OKRs for March, please pick the best 2-4 tasks to tackle today:
-    ${okrSummary}
-    
-    Instructions:
-    1. Do not exceed a total of ${availability.totalMinutes * 0.8} minutes (80% capacity).
-    2. Prioritize tasks that fit into my largest block.
-    3. Format the response as a bulleted "Daily Action Plan".
-  `;
+    const prompt = `
+      Context: Today I have ${availability.totalMinutes} minutes of total free time. 
+      My largest contiguous focus block is ${availability.largestBlock} minutes.
+      
+      Based on my OKRs, pick 2-4 tasks. 
+      Priority Rules:
+      1. If a task's total effort left is small, try to finish it completely today.
+      2. If a task is large, suggest a "session" that fits into my largest block.
+      3. Do not exceed 80% of my available time.
+      
+      Tasks available:
+      ${okrSummary}
+    `;
 
   return callOpenAI(prompt);
 }
@@ -257,4 +315,26 @@ function sendCoachEmail(recipient, aiContent, availability) {
   ].join("\n");
 
   GmailApp.sendEmail(recipient, subject, plainBody, { htmlBody: htmlBody });
+}
+
+function getActiveOKRs(config) {
+  const okrFile = SpreadsheetApp.openById(config.OKR_SHEET_ID);
+  const sheet = okrFile.getSheetByName(config.OKR_TAB_NAME);
+  const rows = sheet.getDataRange().getValues();
+  const headers = rows[0];
+  
+  // Dynamic Index Mapping (Matches the new columns)
+  const idxKR = headers.indexOf("Key Results");
+  const idxEffortPerUnit = headers.indexOf("Effort (mins)");
+  const idxUnitsRem = headers.indexOf("Units Remaining");
+  const idxEffortRem = headers.indexOf("Effort Remaining");
+
+  return rows.slice(1).map(row => {
+    return {
+      name: row[idxKR],
+      unitEffort: row[idxEffortPerUnit],
+      unitsLeft: row[idxUnitsRem],
+      totalEffortLeft: row[idxEffortRem]
+    };
+  }).filter(t => t.unitsLeft > 0); // Only return tasks that aren't finished
 }
