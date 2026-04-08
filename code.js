@@ -36,7 +36,7 @@ function runDailyCoach() {
 
   // --- NEW STEP ---
   // 2.1 Update French progress from yesterday's calendar and Interview Prep from Airtable
-  updateFrenchProgress(config); // From Calendar
+  updateFrenchProgress(config, sheet); // From Calendar
   updateInterviewOKR(config);   // From Airtable
   // ----------------
 
@@ -56,7 +56,7 @@ function runDailyCoach() {
 /**
  * Updates the French OKR running count based on yesterday's calendar events.
  */
-function updateFrenchProgress(config) {
+function updateFrenchProgress(config, sheet) {
   // const ss = SpreadsheetApp.getActiveSpreadsheet();
   // const okrSheet = SpreadsheetApp.openById(config.OKR_SHEET_ID).getSheetByName(config.OKR_TAB_NAME);
   
@@ -174,70 +174,191 @@ function getDailyAvailability(config) {
 
 function getActiveOKRs(config, sheet) {
   const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idxName = headers.indexOf("Key Results");
+  const idxEffort = headers.indexOf("Effort (mins)");
+  const idxDaily = headers.indexOf("Daily");
+  const idxCompleted = headers.indexOf("Completed?");
+
+  const isYes = value => String(value || "").trim().toLowerCase() === "yes";
   
-  // Based on your CSV, Key Result is Column B (Index 1) 
-  // and Effort (mins) is Column E (Index 4)
   return data.slice(1)
-    .map(row => ({ name: row[1], effort: row[4] }))
-    .filter(row => row.name && row.effort > 0);
+    .map(row => ({
+      name: row[idxName],
+      effort: Number(row[idxEffort]) || 0,
+      isDaily: idxDaily > -1 ? isYes(row[idxDaily]) : false,
+      isCompleted: idxCompleted > -1 ? isYes(row[idxCompleted]) : false
+    }))
+    .filter(task => task.name)
+    .filter(task => !task.isCompleted)
+    .filter(task => task.isDaily || task.effort > 0);
+}
+
+function buildFallbackPlan(availability, tasks) {
+  const maxTotalMinutes = Math.max(30, Math.floor(availability.totalMinutes * 0.8));
+  const maxSessionMinutes = Math.max(30, availability.largestBlock);
+  const dailyTasks = tasks.filter(task => task && task.name && task.isDaily);
+  const sortedTasks = tasks
+    .filter(task => task && task.name && !task.isDaily && task.effort > 0)
+    .sort((a, b) => b.effort - a.effort);
+
+  const chosenTasks = dailyTasks.map(task => ({
+    name: task.name,
+    isDaily: true
+  }));
+  let usedMinutes = 0;
+
+  sortedTasks.forEach(task => {
+    if (chosenTasks.length >= 4 + dailyTasks.length) return;
+
+    const sessionLength = Math.min(task.effort, maxSessionMinutes);
+    if (usedMinutes + sessionLength > maxTotalMinutes) return;
+
+    chosenTasks.push({
+      name: task.name,
+      sessionLength: sessionLength,
+      effort: task.effort,
+      isDaily: false
+    });
+    usedMinutes += sessionLength;
+  });
+
+  if (chosenTasks.length === 0) {
+    return "### Plan needs attention\n- No eligible OKR tasks were found with remaining effort.\n- Check the OKR sheet values for task names and effort minutes.";
+  }
+
+  return chosenTasks.map(task => [
+    task.isDaily
+      ? `### ${task.name}`
+      : `### ${task.name}: ${task.sessionLength} mins`
+  ].join("\n")).join("\n\n");
 }
 
 /**
- * Calls OpenAI Chat Completions API securely.
- * Uses 'LLM_API_KEY' from Script Properties.
+ * Uses Google Gemini to prioritize OKR tasks based on available calendar time.
  */
-function callOpenAI(prompt) {
-  const scriptProperties = PropertiesService.getScriptProperties();
-  const apiKey = scriptProperties.getProperty('LLM_API_KEY');
-  
-  if (!apiKey) throw new Error("Missing LLM_API_KEY in Script Properties.");
+function prioritizeTasksWithAI(config, availability, tasks) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const model = PropertiesService.getScriptProperties().getProperty('GEMINI_MODEL') || 'gemini-2.0-flash';
+  const fallbackModel = PropertiesService.getScriptProperties().getProperty('GEMINI_FALLBACK_MODEL') || 'gemini-2.0-flash-lite';
+  if (!apiKey) {
+    Logger.log("Gemini API Error: Missing GEMINI_API_KEY script property.");
+    return "### Error generating plan\n- Could not connect to Gemini. Please check your API key.";
+  }
 
-  const url = "https://api.openai.com/v1/chat/completions";
+  if (!tasks.length) {
+    Logger.log("Gemini API Error: No active tasks found for prioritization.");
+    return "### Plan needs attention\n- No active OKR tasks with remaining effort were found today.";
+  }
+
+  // 1. Format the OKR data for the prompt
+  const okrSummary = tasks.map(t => 
+    t.isDaily
+      ? `- ${t.name} [Daily task, include unless completed]`
+      : `- ${t.name} (${t.effort} mins remaining)`
+  ).join('\n');
+
+  // 2. Construct the Prompt
+  const prompt = `
+    Context: Today is ${new Date().toLocaleDateString()}. 
+    I have ${availability.totalMinutes} minutes of total free time in Paris.
+    My largest contiguous focus block is ${availability.largestBlock} minutes.
+    
+    Based on my OKRs, pick 2-4 tasks for today.
+    Priority Rules:
+    1. Focus on the highest-leverage tasks with meaningful effort remaining.
+    2. Ensure the suggested session fits within my ${availability.largestBlock} min block.
+    3. Do not exceed 80% of my total available time (${availability.totalMinutes * 0.8} mins).
+    4. Every task marked as a daily task must be included unless it is completed.
+    
+    Current OKR Status:
+    ${okrSummary}
+    
+    Output Requirements:
+    Return your response in markdown, not HTML.
+    Do not include any intro paragraph, summary paragraph, or closing sentence.
+    Output only task sections and nothing else.
+    Use this exact structure for each task:
+    ### Task Name: X mins
+    For daily tasks, use this exact structure instead:
+    ### Task Name
+    Every chosen task must come from the Current OKR Status list above.
+    Keep session lengths within ${availability.largestBlock} mins.
+  `;
+
+  // 3. Prepare the Payload for Gemini API
   const payload = {
-    model: "gpt-4o", // You can also use gpt-4-turbo or gpt-3.5-turbo
-    messages: [
-      { role: "system", content: "You are a daily career coach. Your goal is to select the most high-leverage tasks from a list of OKRs that fit within a user's specific calendar availability. Keep recommendations concise, encouraging, and under 100 words." },
-      { role: "user", content: prompt }
-    ],
-    temperature: 0.7
+    "contents": [{
+      "parts": [{
+        "text": prompt
+      }]
+    }],
+    "generationConfig": {
+      "temperature": 0.7,
+      "topK": 40,
+      "topP": 0.95,
+      "maxOutputTokens": 1024,
+    }
   };
 
   const options = {
-    method: "post",
-    contentType: "application/json",
-    headers: { "Authorization": "Bearer " + apiKey },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
+    "method": "post",
+    "contentType": "application/json",
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
   };
 
-  const response = UrlFetchApp.fetch(url, options);
-  const json = JSON.parse(response.getContentText());
-  
-  if (json.error) throw new Error("OpenAI Error: " + json.error.message);
-  return json.choices[0].message.content;
-}
+  const modelsToTry = [model];
+  if (fallbackModel && fallbackModel !== model) {
+    modelsToTry.push(fallbackModel);
+  }
 
-function prioritizeTasksWithAI(config, availability, tasks) {
-  // Format OKRs for the prompt
-  const okrSummary = tasks.map(t => 
-      `- ${t.name}: ${t.unitsLeft} units remaining (Total effort left: ${t.totalEffortLeft} mins)`
-    ).join('\n');
-    
-    const prompt = `
-      Context: Today I have ${availability.totalMinutes} minutes of total free time. 
-      My largest contiguous focus block is ${availability.largestBlock} minutes.
-      
-      Based on my OKRs, pick 2-4 tasks. 
-      Priority Rules:
-      1. If a task's total effort left is small, try to finish it completely today.
-      2. If a task is large, suggest a "session" that fits into my largest block.
-      3. Do not exceed 80% of my available time.
-      
-      Tasks available:
-      ${okrSummary}
-    `;
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const currentModel = modelsToTry[i];
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`;
 
-  return callOpenAI(prompt);
+    try {
+      const response = UrlFetchApp.fetch(url, options);
+      if (response.getResponseCode() !== 200) {
+        throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+      }
+
+      const result = JSON.parse(response.getContentText());
+      
+      // Gemini response structure: result.candidates[0].content.parts[0].text
+      const aiText = result.candidates?.[0]?.content?.parts
+        ?.map(part => part.text || "")
+        .join("\n")
+        .trim();
+
+      const hasStructuredTasks = aiText && /^###\s+.+/m.test(aiText);
+
+      if (hasStructuredTasks) {
+        return aiText;
+      }
+
+      if (aiText) {
+        Logger.log(`Gemini API Warning (${currentModel}): Response was unstructured, using fallback plan. Raw response: ${aiText}`);
+        return buildFallbackPlan(availability, tasks);
+      }
+
+      throw new Error("Empty response from Gemini: " + response.getContentText());
+    } catch (e) {
+      Logger.log(`Gemini API Error (${currentModel}): ` + e.message);
+
+      const isLastModel = i === modelsToTry.length - 1;
+      if (isLastModel) {
+        return buildFallbackPlan(availability, tasks);
+      }
+
+      const shouldTryNextModel = /HTTP 503|HTTP 429|HTTP 404/.test(String(e.message || ""));
+      if (!shouldTryNextModel) {
+        return buildFallbackPlan(availability, tasks);
+      }
+    }
+  }
+
+  return buildFallbackPlan(availability, tasks);
 }
 
 function escapeHtml(text) {
@@ -270,6 +391,12 @@ function markdownToHtml(markdown) {
       return;
     }
 
+    const headingMatch = line.match(/^###\s+(.*)$/);
+    if (headingMatch) {
+      html.push(`<h3>${formatInlineMarkdown(escapeHtml(headingMatch[1]))}</h3>`);
+      return;
+    }
+
     const bulletMatch = line.match(/^[-*]\s+(.*)$/);
     if (bulletMatch) {
       if (!inList) {
@@ -296,6 +423,7 @@ function markdownToHtml(markdown) {
 
 function markdownToPlainText(markdown) {
   return (markdown || "")
+    .replace(/^###\s+/gm, "")
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/^[-*]\s+/gm, "- ");
 }
@@ -319,7 +447,7 @@ function sendCoachEmail(recipient, aiContent, availability) {
   const htmlBody = [
     "<div style=\"font-family:Arial,sans-serif;line-height:1.5;color:#222;\">",
     "<p><strong>Good morning!</strong></p>",
-    `<p>Today you have <strong>${availability.totalMinutes} minutes</strong> of White Space across your calendars.</p>`,
+    `<p>Today you have <strong>${availability.totalMinutes} minutes</strong> of white space across your calendars. The following are your proposed tasks: </p>`,
     aiHtml,
     "<p>Go get &#39;em!</p>",
     "</div>"
