@@ -234,6 +234,38 @@ function buildFallbackPlan(availability, tasks) {
   ].join("\n")).join("\n\n");
 }
 
+function hasValidStructuredTasks(aiText, tasks) {
+  if (!aiText) return false;
+
+  const taskLookup = {};
+  tasks.forEach(task => {
+    if (task && task.name) {
+      taskLookup[String(task.name).trim()] = task;
+    }
+  });
+
+  const headings = aiText.split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line.startsWith("### "));
+
+  if (!headings.length) return false;
+
+  return headings.every(heading => {
+    const content = heading.replace(/^###\s+/, "").trim();
+    if (!content) return false;
+
+    if (taskLookup[content]?.isDaily) {
+      return true;
+    }
+
+    const timedMatch = content.match(/^(.*):\s*(\d+)\s+mins$/);
+    if (!timedMatch) return false;
+
+    const taskName = timedMatch[1].trim();
+    return Boolean(taskLookup[taskName] && !taskLookup[taskName].isDaily);
+  });
+}
+
 /**
  * Uses Google Gemini to prioritize OKR tasks based on available calendar time.
  */
@@ -331,7 +363,7 @@ function prioritizeTasksWithAI(config, availability, tasks) {
         .join("\n")
         .trim();
 
-      const hasStructuredTasks = aiText && /^###\s+.+/m.test(aiText);
+      const hasStructuredTasks = hasValidStructuredTasks(aiText, tasks);
 
       if (hasStructuredTasks) {
         return aiText;
@@ -456,11 +488,81 @@ function sendCoachEmail(recipient, aiContent, availability) {
   GmailApp.sendEmail(recipient, subject, plainBody, { htmlBody: htmlBody });
 }
 
+function getCurrentOKRSheet(config) {
+  const now = new Date();
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const currentTabName = monthNames[now.getMonth()] + "_" + now.getFullYear().toString().slice(-2);
+
+  const ss = SpreadsheetApp.openById(config.OKR_SHEET_ID);
+  const sheet = ss.getSheetByName(currentTabName);
+
+  if (!sheet) {
+    Logger.log(`Error: Tab '${currentTabName}' not found. Please create it for the new month.`);
+    return null;
+  }
+
+  return sheet;
+}
+
+function updateRunningCountForKeyResult(sheet, keyResultText, runningCount) {
+  const rows = sheet.getDataRange().getValues();
+  const headers = rows[0];
+  const idxKR = headers.indexOf("Key Results");
+  const idxRun = headers.indexOf("Running Count");
+
+  if (idxKR === -1 || idxRun === -1) {
+    Logger.log("Warning: Could not find 'Key Results' or 'Running Count' columns in the OKR sheet.");
+    return false;
+  }
+
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][idxKR].toString().includes(keyResultText)) {
+      sheet.getRange(i + 1, idxRun + 1).setValue(runningCount);
+      Logger.log(`Spreadsheet Updated: row ${i + 1} for '${keyResultText}' set to ${runningCount}.`);
+      return true;
+    }
+  }
+
+  Logger.log(`Warning: Could not find a matching Key Result row for '${keyResultText}'.`);
+  return false;
+}
+
+function fetchAirtableRecords(baseId, tableName, pat) {
+  const options = {
+    "method": "get",
+    "headers": { "Authorization": "Bearer " + pat },
+    "muteHttpExceptions": true
+  };
+
+  let allRecords = [];
+  let offset;
+
+  do {
+    const url = offset
+      ? `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}?offset=${encodeURIComponent(offset)}`
+      : `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}`;
+    const response = UrlFetchApp.fetch(url, options);
+
+    if (response.getResponseCode() !== 200) {
+      throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+    }
+
+    const data = JSON.parse(response.getContentText());
+    allRecords = allRecords.concat(data.records || []);
+    offset = data.offset;
+  } while (offset);
+
+  return allRecords;
+}
+
 function updateInterviewOKR(config) {
   const pat = PropertiesService.getScriptProperties().getProperty('AIRTABLE_PAT');
   const baseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID'); 
   const tableName = "Responses";
   const fieldName = "Updated Response Modified This Month";
+  const crmBaseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID_CRM');
+  const crmMeetingsTable = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_MEETINGS') || "Meetings";
+  const crmJobsTable = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_JOBS') || "Jobs";
   
   // 1. Updated Filter Syntax based on successful debug test
   const filter = `({${fieldName}} = TRUE())`;
@@ -480,37 +582,47 @@ function updateInterviewOKR(config) {
     const count = data.records ? data.records.length : 0;
     Logger.log(`Airtable Sync: Found ${count} updated responses.`);
 
-    // 2. Dynamic Tab Selection (e.g., Mar_26)
-    const now = new Date();
-    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    const currentTabName = monthNames[now.getMonth()] + "_" + now.getFullYear().toString().slice(-2);
-    
-    const ss = SpreadsheetApp.openById(config.OKR_SHEET_ID);
-    const sheet = ss.getSheetByName(currentTabName);
-    
+    const sheet = getCurrentOKRSheet(config);
     if (!sheet) {
-      Logger.log(`Error: Tab '${currentTabName}' not found. Please create it for the new month.`);
       return;
     }
 
-    // 3. Update the Spreadsheet
-    const rows = sheet.getDataRange().getValues();
-    const headers = rows[0];
-    const idxKR = headers.indexOf("Key Results");
-    const idxRun = headers.indexOf("Running Count");
+    updateRunningCountForKeyResult(sheet, "responses to common interview questions", count);
 
-    let matchFound = false;
-    for (let i = 1; i < rows.length; i++) {
-      // Searching for the specific Interview Question OKR
-      if (rows[i][idxKR].toString().includes("responses to common interview questions")) {
-        sheet.getRange(i + 1, idxRun + 1).setValue(count);
-        Logger.log(`Spreadsheet Updated: ${currentTabName} row ${i+1} set to ${count}.`);
-        matchFound = true;
-        break;
-      }
+    if (!crmBaseId) {
+      Logger.log("Airtable CRM Sync Warning: Missing AIRTABLE_BASE_ID_CRM script property.");
+      return;
     }
-    
-    if (!matchFound) Logger.log("Warning: Could not find a matching Key Result row in the sheet.");
+
+    const meetingRecords = fetchAirtableRecords(crmBaseId, crmMeetingsTable, pat);
+    const clinicianInterviewSum = meetingRecords.reduce((total, record) => {
+      return total + (Number(record.fields?.Clinician_User_Interview_CM) || 0);
+    }, 0);
+    const practiceInterviewSum = meetingRecords.reduce((total, record) => {
+      return total + (Number(record.fields?.Practice_Interview_CM) || 0);
+    }, 0);
+
+    Logger.log(`Airtable CRM Sync: Found ${meetingRecords.length} meetings. Clinician sum=${clinicianInterviewSum}, Practice sum=${practiceInterviewSum}.`);
+
+    updateRunningCountForKeyResult(sheet, "Establish contact with active clinicians", clinicianInterviewSum);
+    updateRunningCountForKeyResult(sheet, "Practice Interviews (case + behavioral ideally)", practiceInterviewSum);
+
+    const jobRecords = fetchAirtableRecords(crmBaseId, crmJobsTable, pat);
+    const referralApplicationsSum = jobRecords.reduce((total, record) => {
+      return total + (Number(record.fields?.AppSubmitted_Product_ActualReferral_CM) || 0);
+    }, 0);
+    const productApplicationsSum = jobRecords.reduce((total, record) => {
+      return total + (Number(record.fields?.AppSubmitted_Product_CM) || 0);
+    }, 0);
+    const jobsListedSum = jobRecords.reduce((total, record) => {
+      return total + (Number(record.fields?.JDCreated_Product_CM) || 0);
+    }, 0);
+
+    Logger.log(`Airtable CRM Jobs Sync: Found ${jobRecords.length} jobs. Referral apps=${referralApplicationsSum}, PM apps=${productApplicationsSum}, PM jobs listed=${jobsListedSum}.`);
+
+    updateRunningCountForKeyResult(sheet, "Apply to PM jobs that included a referral", referralApplicationsSum);
+    updateRunningCountForKeyResult(sheet, "Apply to PM jobs", productApplicationsSum);
+    updateRunningCountForKeyResult(sheet, "Find and list PM Jobs", jobsListedSum);
 
   } catch (e) {
     Logger.log("Airtable Sync Error: " + e.message);
