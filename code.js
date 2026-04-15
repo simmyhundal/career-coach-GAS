@@ -558,7 +558,7 @@ function fetchAirtableRecords(baseId, tableName, pat) {
 function updateInterviewOKR(config) {
   const pat = PropertiesService.getScriptProperties().getProperty('AIRTABLE_PAT');
   const baseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID'); 
-  const tableName = "Responses";
+  const tableName = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME') || "Responses";
   const fieldName = "Updated Response Modified This Month";
   const crmBaseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID_CRM');
   const crmMeetingsTable = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_MEETINGS') || "Meetings";
@@ -576,11 +576,18 @@ function updateInterviewOKR(config) {
 
   try {
     const response = UrlFetchApp.fetch(url, options);
+    if (response.getResponseCode() !== 200) {
+      throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+    }
     const data = JSON.parse(response.getContentText());
+    const allResponseRecords = fetchAirtableRecords(baseId, tableName, pat);
     
     // Total count of records marked 'True' this month
     const count = data.records ? data.records.length : 0;
-    Logger.log(`Airtable Sync: Found ${count} updated responses.`);
+    const responseCmSum = allResponseRecords.reduce((total, record) => {
+      return total + (Number(record.fields?.Response_CM) || 0);
+    }, 0);
+    Logger.log(`Airtable Sync: Found ${count} updated responses. Response_CM sum across all records=${responseCmSum}.`);
 
     const sheet = getCurrentOKRSheet(config);
     if (!sheet) {
@@ -588,6 +595,7 @@ function updateInterviewOKR(config) {
     }
 
     updateRunningCountForKeyResult(sheet, "responses to common interview questions", count);
+    updateRunningCountForKeyResult(sheet, "Record responses to common interview questions and receive feedback from GenAI", responseCmSum);
 
     if (!crmBaseId) {
       Logger.log("Airtable CRM Sync Warning: Missing AIRTABLE_BASE_ID_CRM script property.");
