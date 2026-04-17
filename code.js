@@ -103,16 +103,11 @@ function updateFrenchProgress(config, sheet) {
   }
 }
 
-function getDailyAvailability(config) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const calendarSheet = ss.getSheetByName("Google CalendarIds");
-  const calIds = calendarSheet.getRange("B2:B" + calendarSheet.getLastRow()).getValues().flat().filter(String);
-
-// Replace the time definition lines (lines 35-41) with this:
+function getWorkdayRange(config) {
   let todayStart = new Date();
-  let startTime = config.WORK_START; // Was config.workStart
+  let startTime = config.WORK_START;
   let startH, startM;
-  
+
   if (startTime instanceof Date) {
     startH = startTime.getHours();
     startM = startTime.getMinutes();
@@ -122,7 +117,7 @@ function getDailyAvailability(config) {
   todayStart.setHours(startH, startM, 0, 0);
 
   let todayEnd = new Date();
-  let endTime = config.WORK_END;     // Was config.workEnd
+  let endTime = config.WORK_END;
   let endH, endM;
 
   if (endTime instanceof Date) {
@@ -132,6 +127,60 @@ function getDailyAvailability(config) {
     [endH, endM] = endTime.toString().split(':');
   }
   todayEnd.setHours(endH, endM, 0, 0);
+
+  return { start: todayStart, end: todayEnd };
+}
+
+function getCalendarIds() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const calendarSheet = ss.getSheetByName("Google CalendarIds");
+  return calendarSheet.getRange("B2:B" + calendarSheet.getLastRow()).getValues().flat().filter(String);
+}
+
+function formatEventTimeRange(start, end) {
+  const tz = Session.getScriptTimeZone();
+  return `${Utilities.formatDate(start, tz, "h:mm a")} - ${Utilities.formatDate(end, tz, "h:mm a")}`;
+}
+
+function getUpcomingWorkdayEvents(calIds, todayStart, todayEnd) {
+  const seenEvents = {};
+  const events = [];
+
+  calIds.forEach(calId => {
+    const calendar = CalendarApp.getCalendarById(calId);
+    if (!calendar) {
+      Logger.log(`Warning: Could not find calendar '${calId}' while building email event list.`);
+      return;
+    }
+
+    calendar.getEvents(todayStart, todayEnd).forEach(event => {
+      const title = String(event.getTitle() || "").trim() || "Untitled event";
+      const start = event.getStartTime();
+      const end = event.getEndTime();
+      const dedupeKey = [title, start.getTime(), end.getTime()].join("|");
+
+      if (seenEvents[dedupeKey]) {
+        return;
+      }
+
+      seenEvents[dedupeKey] = true;
+      events.push({
+        title: title,
+        start: start,
+        end: end,
+        timeLabel: formatEventTimeRange(start, end)
+      });
+    });
+  });
+
+  return events.sort((a, b) => a.start - b.start);
+}
+
+function getDailyAvailability(config) {
+  const calIds = getCalendarIds();
+  const workday = getWorkdayRange(config);
+  const todayStart = workday.start;
+  const todayEnd = workday.end;
 
   const response = Calendar.Freebusy.query({
     timeMin: todayStart.toISOString(),
@@ -169,7 +218,29 @@ function getDailyAvailability(config) {
     if (finalGap > largestBlock) largestBlock = finalGap;
   }
 
-  return { totalMinutes: Math.round(freeMinutes), largestBlock: Math.round(largestBlock) };
+  return {
+    totalMinutes: Math.round(freeMinutes),
+    largestBlock: Math.round(largestBlock),
+    upcomingEvents: getUpcomingWorkdayEvents(calIds, todayStart, todayEnd)
+  };
+}
+
+function normalizeTaskName(value) {
+  if (value instanceof Date) {
+    return "";
+  }
+
+  const name = String(value || "").trim();
+  if (!name) {
+    return "";
+  }
+
+  // Skip accidental numeric/date-like sheet values that should not become task titles.
+  if (!/\p{L}/u.test(name)) {
+    return "";
+  }
+
+  return name;
 }
 
 function getActiveOKRs(config, sheet) {
@@ -184,7 +255,7 @@ function getActiveOKRs(config, sheet) {
   
   return data.slice(1)
     .map(row => ({
-      name: row[idxName],
+      name: normalizeTaskName(row[idxName]),
       effort: Number(row[idxEffort]) || 0,
       isDaily: idxDaily > -1 ? isYes(row[idxDaily]) : false,
       isCompleted: idxCompleted > -1 ? isYes(row[idxCompleted]) : false
@@ -460,16 +531,43 @@ function markdownToPlainText(markdown) {
     .replace(/^[-*]\s+/gm, "- ");
 }
 
+function buildUpcomingEventsPlainText(events) {
+  if (!events || !events.length) {
+    return "No calendar events scheduled during your workday.";
+  }
+
+  return events.map(event => `- ${event.timeLabel}: ${event.title}`).join("\n");
+}
+
+function buildUpcomingEventsHtml(events) {
+  if (!events || !events.length) {
+    return "<p>No calendar events scheduled during your workday.</p>";
+  }
+
+  return [
+    "<ul>",
+    events.map(event => `<li><strong>${escapeHtml(event.timeLabel)}</strong>: ${escapeHtml(event.title)}</li>`).join("\n"),
+    "</ul>"
+  ].join("\n");
+}
+
 function sendCoachEmail(recipient, aiContent, availability) {
   const subjectDate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MMM d, yyyy");
   const subject = `Your Daily Career Coach: ${subjectDate}`;
   const aiPlain = markdownToPlainText(aiContent).trim();
   const aiHtml = markdownToHtml(aiContent);
+  const upcomingEventsPlain = buildUpcomingEventsPlainText(availability.upcomingEvents);
+  const upcomingEventsHtml = buildUpcomingEventsHtml(availability.upcomingEvents);
 
   const plainBody = [
     "Good morning!",
     "",
     `Today you have ${availability.totalMinutes} minutes of White Space across your calendars.`,
+    "",
+    "Coming up on your calendar:",
+    upcomingEventsPlain,
+    "",
+    "The following are your proposed tasks:",
     "",
     aiPlain,
     "",
@@ -479,7 +577,10 @@ function sendCoachEmail(recipient, aiContent, availability) {
   const htmlBody = [
     "<div style=\"font-family:Arial,sans-serif;line-height:1.5;color:#222;\">",
     "<p><strong>Good morning!</strong></p>",
-    `<p>Today you have <strong>${availability.totalMinutes} minutes</strong> of white space across your calendars. The following are your proposed tasks: </p>`,
+    `<p>Today you have <strong>${availability.totalMinutes} minutes</strong> of white space across your calendars.</p>`,
+    "<p><strong>Coming up on your calendar:</strong></p>",
+    upcomingEventsHtml,
+    "<p>The following are your proposed tasks:</p>",
     aiHtml,
     "<p>Go get &#39;em!</p>",
     "</div>"
