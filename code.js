@@ -48,9 +48,12 @@ function runDailyCoach() {
   
   // 4. Get AI Recommendation
   const aiContent = prioritizeTasksWithAI(config, availability, tasks);
+
+  // 4.1 Pull live PM jobs from five-star employers
+  const featuredJobs = getFeaturedProductJobs();
   
   // 5. Send the Email
-  sendCoachEmail(config.USER_EMAIL, aiContent, availability);
+  sendCoachEmail(config.USER_EMAIL, aiContent, availability, featuredJobs);
 }
 
 /**
@@ -337,6 +340,204 @@ function hasValidStructuredTasks(aiText, tasks) {
   });
 }
 
+function isGeminiQuotaError(message) {
+  const text = String(message || "");
+  return /HTTP 429|RESOURCE_EXHAUSTED|quota|out of credits|insufficient credits|billing/i.test(text);
+}
+
+function getExaApiKey() {
+  return PropertiesService.getScriptProperties().getProperty('EXA_API_KEY');
+}
+
+function fetchExaSearchResults(query, extraPayload) {
+  const apiKey = getExaApiKey();
+  if (!apiKey) {
+    throw new Error("Missing EXA_API_KEY script property.");
+  }
+
+  const payload = Object.assign({
+    query: query,
+    type: "auto",
+    numResults: 10,
+    text: false
+  }, extraPayload || {});
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "x-api-key": apiKey
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch("https://api.exa.ai/search", options);
+  if (response.getResponseCode() !== 200) {
+    throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+  }
+
+  const result = JSON.parse(response.getContentText());
+  return result.results || [];
+}
+
+function fetchExaContents(urls, extraPayload) {
+  const apiKey = getExaApiKey();
+  if (!apiKey) {
+    throw new Error("Missing EXA_API_KEY script property.");
+  }
+
+  const payload = Object.assign({
+    urls: urls,
+    text: true,
+    livecrawl: "preferred",
+    livecrawlTimeout: 12000
+  }, extraPayload || {});
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "x-api-key": apiKey
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch("https://api.exa.ai/contents", options);
+  if (response.getResponseCode() !== 200) {
+    throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+  }
+
+  const result = JSON.parse(response.getContentText());
+  return result.results || [];
+}
+
+function fetchExaStructuredAnswer(query, outputSchema) {
+  const apiKey = getExaApiKey();
+  if (!apiKey) {
+    throw new Error("Missing EXA_API_KEY script property.");
+  }
+
+  const payload = {
+    query: query,
+    text: true,
+    outputSchema: outputSchema
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "x-api-key": apiKey
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch("https://api.exa.ai/answer", options);
+  if (response.getResponseCode() !== 200) {
+    throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+  }
+
+  const result = JSON.parse(response.getContentText());
+  return result.answer;
+}
+
+function buildStructuredTasksMarkdown(taskItems, tasks) {
+  if (!taskItems || !taskItems.length) {
+    return "";
+  }
+
+  const taskLookup = tasks.reduce((lookup, task) => {
+    if (task && task.name) {
+      lookup[String(task.name).trim()] = task;
+    }
+    return lookup;
+  }, {});
+
+  const lines = taskItems
+    .map(item => {
+      const taskName = String(item.name || "").trim();
+      const sourceTask = taskLookup[taskName];
+      if (!sourceTask) {
+        return "";
+      }
+
+      if (sourceTask.isDaily) {
+        return `### ${taskName}`;
+      }
+
+      const minutes = Math.round(Number(item.minutes) || 0);
+      if (!minutes) {
+        return "";
+      }
+
+      return `### ${taskName}: ${minutes} mins`;
+    })
+    .filter(Boolean);
+
+  const markdown = lines.join("\n\n");
+  return hasValidStructuredTasks(markdown, tasks) ? markdown : "";
+}
+
+function prioritizeTasksWithExa(availability, tasks) {
+  const outputSchema = {
+    type: "object",
+    properties: {
+      tasks: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            minutes: { type: "number" }
+          },
+          required: ["name", "minutes"],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ["tasks"],
+    additionalProperties: false
+  };
+
+  const okrSummary = tasks.map(t =>
+    t.isDaily
+      ? `- ${t.name} [Daily task, include unless completed]`
+      : `- ${t.name} (${t.effort} mins remaining)`
+  ).join('\n');
+
+  const query = `
+Today I have ${availability.totalMinutes} minutes of total free time in Paris and my largest contiguous focus block is ${availability.largestBlock} minutes.
+
+From the OKRs below, choose 2-4 tasks for today.
+
+Rules:
+- Focus on the highest-leverage tasks with meaningful effort remaining.
+- Ensure the suggested session fits within ${availability.largestBlock} minutes.
+- Do not exceed 80% of my total available time (${availability.totalMinutes * 0.8} mins).
+- Every daily task must be included unless it is completed.
+- Every chosen task must come exactly from this OKR list.
+
+OKRs:
+${okrSummary}
+
+Return a structured object with a tasks array.
+For daily tasks, set minutes to 0.
+For non-daily tasks, set minutes to the planned session length.
+`;
+
+  try {
+    const answer = fetchExaStructuredAnswer(query, outputSchema);
+    const markdown = buildStructuredTasksMarkdown(answer?.tasks, tasks);
+    return markdown || buildFallbackPlan(availability, tasks);
+  } catch (e) {
+    Logger.log("Exa task prioritization error: " + e.message);
+    return buildFallbackPlan(availability, tasks);
+  }
+}
+
 /**
  * Uses Google Gemini to prioritize OKR tasks based on available calendar time.
  */
@@ -344,14 +545,14 @@ function prioritizeTasksWithAI(config, availability, tasks) {
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   const model = PropertiesService.getScriptProperties().getProperty('GEMINI_MODEL') || 'gemini-2.0-flash';
   const fallbackModel = PropertiesService.getScriptProperties().getProperty('GEMINI_FALLBACK_MODEL') || 'gemini-2.0-flash-lite';
-  if (!apiKey) {
-    Logger.log("Gemini API Error: Missing GEMINI_API_KEY script property.");
-    return "### Error generating plan\n- Could not connect to Gemini. Please check your API key.";
-  }
-
   if (!tasks.length) {
     Logger.log("Gemini API Error: No active tasks found for prioritization.");
     return "### Plan needs attention\n- No active OKR tasks with remaining effort were found today.";
+  }
+
+  if (!apiKey) {
+    Logger.log("Gemini API Error: Missing GEMINI_API_KEY script property. Falling back to Exa.");
+    return prioritizeTasksWithExa(availability, tasks);
   }
 
   // 1. Format the OKR data for the prompt
@@ -448,6 +649,11 @@ function prioritizeTasksWithAI(config, availability, tasks) {
       throw new Error("Empty response from Gemini: " + response.getContentText());
     } catch (e) {
       Logger.log(`Gemini API Error (${currentModel}): ` + e.message);
+
+      if (isGeminiQuotaError(e.message)) {
+        Logger.log(`Gemini API quota exhausted (${currentModel}). Falling back to Exa for task prioritization.`);
+        return prioritizeTasksWithExa(availability, tasks);
+      }
 
       const isLastModel = i === modelsToTry.length - 1;
       if (isLastModel) {
@@ -551,13 +757,57 @@ function buildUpcomingEventsHtml(events) {
   ].join("\n");
 }
 
-function sendCoachEmail(recipient, aiContent, availability) {
+function buildFeaturedJobsPlainText(jobs) {
+  if (!jobs || !jobs.length) {
+    return "No product management jobs were found today from your five-star employers.";
+  }
+
+  return jobs.map((job, index) => {
+    const parts = [
+      `${index + 1}. ${job.title} - ${job.company}`,
+      job.location ? `Location: ${job.location}` : "",
+      job.source ? `Source: ${job.source}` : "",
+      job.url || ""
+    ].filter(Boolean);
+
+    return parts.join("\n");
+  }).join("\n\n");
+}
+
+function buildFeaturedJobsHtml(jobs) {
+  if (!jobs || !jobs.length) {
+    return "<p>No product management jobs were found today from your five-star employers.</p>";
+  }
+
+  return [
+    "<ol>",
+    jobs.map(job => {
+      const detailParts = [
+        job.location ? escapeHtml(job.location) : "",
+        job.source ? escapeHtml(job.source) : ""
+      ].filter(Boolean).join(" | ");
+
+      const title = escapeHtml(job.title || "Product role");
+      const company = escapeHtml(job.company || "Unknown employer");
+      const safeUrl = escapeHtml(job.url || "");
+      const details = detailParts ? `<div style=\"color:#555;\">${detailParts}</div>` : "";
+      const link = safeUrl ? `<div><a href=\"${safeUrl}\">${safeUrl}</a></div>` : "";
+
+      return `<li><strong>${title}</strong> - ${company}${details}${link}</li>`;
+    }).join("\n"),
+    "</ol>"
+  ].join("\n");
+}
+
+function sendCoachEmail(recipient, aiContent, availability, featuredJobs) {
   const subjectDate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MMM d, yyyy");
   const subject = `Your Daily Career Coach: ${subjectDate}`;
   const aiPlain = markdownToPlainText(aiContent).trim();
   const aiHtml = markdownToHtml(aiContent);
   const upcomingEventsPlain = buildUpcomingEventsPlainText(availability.upcomingEvents);
   const upcomingEventsHtml = buildUpcomingEventsHtml(availability.upcomingEvents);
+  const featuredJobsPlain = buildFeaturedJobsPlainText(featuredJobs);
+  const featuredJobsHtml = buildFeaturedJobsHtml(featuredJobs);
 
   const plainBody = [
     "Good morning!",
@@ -571,6 +821,10 @@ function sendCoachEmail(recipient, aiContent, availability) {
     "",
     aiPlain,
     "",
+    "Product management jobs from your five-star employers:",
+    "",
+    featuredJobsPlain,
+    "",
     "Go get 'em!"
   ].join("\n");
 
@@ -582,6 +836,8 @@ function sendCoachEmail(recipient, aiContent, availability) {
     upcomingEventsHtml,
     "<p>The following are your proposed tasks:</p>",
     aiHtml,
+    "<p><strong>Product management jobs from your five-star employers:</strong></p>",
+    featuredJobsHtml,
     "<p>Go get &#39;em!</p>",
     "</div>"
   ].join("\n");
@@ -654,6 +910,553 @@ function fetchAirtableRecords(baseId, tableName, pat) {
   } while (offset);
 
   return allRecords;
+}
+
+function extractJsonArray(text) {
+  if (!text) {
+    return [];
+  }
+
+  const cleaned = String(text).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  const start = cleaned.indexOf("[");
+  const end = cleaned.lastIndexOf("]");
+
+  if (start === -1 || end === -1 || end < start) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(cleaned.slice(start, end + 1));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    Logger.log("Job JSON Parse Error: " + e.message);
+    return [];
+  }
+}
+
+function normalizeMotivationValue(value) {
+  return String(value == null ? "" : value).trim().toLowerCase();
+}
+
+function isFiveStarEmployer(record) {
+  const motivation = normalizeMotivationValue(record.fields?.["Max Motivation"]);
+  return motivation === "5" || motivation === "five" || motivation === "5.0";
+}
+
+function getEmployerNameFromRecord(record) {
+  const fields = record.fields || {};
+  const candidateFields = ["Company", "Company Name", "Employer", "Employer Name", "Name"];
+
+  for (let i = 0; i < candidateFields.length; i++) {
+    const rawValue = fields[candidateFields[i]];
+    const value = Array.isArray(rawValue) ? String(rawValue[0] || "").trim() : String(rawValue || "").trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  const firstStringField = Object.keys(fields).find(key => typeof fields[key] === "string" && String(fields[key]).trim());
+  return firstStringField ? String(fields[firstStringField]).trim() : "";
+}
+
+function normalizeEmployerName(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function isTruthyFieldValue(value) {
+  if (value === true) {
+    return true;
+  }
+
+  const normalized = String(value == null ? "" : value).trim().toLowerCase();
+  return normalized === "true" || normalized === "yes" || normalized === "y" || normalized === "1";
+}
+
+function getDestinationNameFromRecord(record) {
+  const fields = record.fields || {};
+  const candidateFields = ["City", "Metro Area", "Destination", "Location", "Name"];
+
+  for (let i = 0; i < candidateFields.length; i++) {
+    const rawValue = fields[candidateFields[i]];
+    const value = Array.isArray(rawValue) ? String(rawValue[0] || "").trim() : String(rawValue || "").trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  const firstStringField = Object.keys(fields).find(key => typeof fields[key] === "string" && String(fields[key]).trim());
+  return firstStringField ? String(fields[firstStringField]).trim() : "";
+}
+
+function getAcceptableDestinations() {
+  const pat = PropertiesService.getScriptProperties().getProperty('AIRTABLE_PAT');
+  const crmBaseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID_CRM');
+  const citiesTable = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_CITIES') || "Cities";
+
+  if (!pat || !crmBaseId) {
+    Logger.log("Acceptable destination lookup skipped: missing AIRTABLE_PAT or AIRTABLE_BASE_ID_CRM.");
+    return [];
+  }
+
+  try {
+    const cityRecords = fetchAirtableRecords(crmBaseId, citiesTable, pat);
+    const destinationLookup = {};
+
+    cityRecords
+      .filter(record => isTruthyFieldValue(record.fields?.["Acceptable Destination?"]))
+      .map(getDestinationNameFromRecord)
+      .filter(Boolean)
+      .forEach(name => {
+        destinationLookup[name] = true;
+      });
+
+    return Object.keys(destinationLookup).sort();
+  } catch (e) {
+    Logger.log("Acceptable destination lookup error: " + e.message);
+    return [];
+  }
+}
+
+function getFiveStarEmployers() {
+  const pat = PropertiesService.getScriptProperties().getProperty('AIRTABLE_PAT');
+  const crmBaseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID_CRM');
+  const companiesTable = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_COMPANIES') || "Companies";
+
+  if (!pat || !crmBaseId) {
+    Logger.log("Five-star employer lookup skipped: missing AIRTABLE_PAT or AIRTABLE_BASE_ID_CRM.");
+    return [];
+  }
+
+  try {
+    const companyRecords = fetchAirtableRecords(crmBaseId, companiesTable, pat);
+    const employerLookup = {};
+
+    companyRecords
+      .filter(isFiveStarEmployer)
+      .map(getEmployerNameFromRecord)
+      .filter(Boolean)
+      .forEach(name => {
+        employerLookup[name] = true;
+      });
+
+    return Object.keys(employerLookup).sort();
+  } catch (e) {
+    Logger.log("Five-star employer lookup error: " + e.message);
+    return [];
+  }
+}
+
+function normalizeJobPosting(job) {
+  return {
+    title: String(job.title || "").trim(),
+    company: String(job.company || "").trim(),
+    location: String(job.location || "").trim(),
+    source: String(job.source || "").trim(),
+    url: String(job.url || "").trim()
+  };
+}
+
+function isValidFeaturedJob(job, employerLookup) {
+  if (!job.title || !job.company || !job.url) {
+    return false;
+  }
+
+  return Boolean(employerLookup[normalizeEmployerName(job.company)]);
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function getDomainFromUrl(url) {
+  const match = String(url || "").match(/^https?:\/\/([^\/?#]+)/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function looksLikeSpecificJobUrl(url) {
+  const normalizedUrl = String(url || "").toLowerCase();
+  if (!normalizedUrl) {
+    return false;
+  }
+
+  const blockedPatterns = [
+    /levels\.fyi\/jobs\/company\//,
+    /linkedin\.com\/jobs\/[^\/]+-jobs/,
+    /linkedin\.com\/jobs\/search/,
+    /pitchmeai\.com\//,
+    /indeed\.com\/q-/,
+    /glassdoor\./
+  ];
+
+  if (blockedPatterns.some(pattern => pattern.test(normalizedUrl))) {
+    return false;
+  }
+
+  const genericPatterns = [
+    /\/careers\/?$/,
+    /\/jobs\/?$/,
+    /\/job-search\/?$/,
+    /\/search\/?$/,
+    /\/explore-careers\/?$/,
+    /\/area-of-interest\//,
+    /\/locations\/?$/,
+    /\/teams\/?$/,
+    /\/departments\/?$/
+  ];
+
+  if (genericPatterns.some(pattern => pattern.test(normalizedUrl))) {
+    return false;
+  }
+
+  const jobDetailPatterns = [
+    /\/jobs\/\d+/,
+    /\/job\/[a-z0-9-]+/,
+    /\/jobs\/[a-z0-9-]{6,}/,
+    /\/positions?\//,
+    /\/openings\//,
+    /\/o\/[a-z0-9-]+/,
+    /gh_jid=/,
+    /lever\.co\/[^\/]+\/[a-z0-9-]+/,
+    /smartrecruiters\.com\/[^\/]+\/[^\/]+/,
+    /workdayjobs\.com\/[^\/]+\/job\//
+  ];
+
+  return jobDetailPatterns.some(pattern => pattern.test(normalizedUrl));
+}
+
+function isRelevantMidLevelProductRole(title, text) {
+  const haystack = `${String(title || "")} ${String(text || "")}`.toLowerCase();
+
+  if (!/(product manager|senior product manager|group product manager|lead product manager|technical product manager|growth product manager|platform product manager|ai product manager)/.test(haystack)) {
+    return false;
+  }
+
+  return !/(principal product manager|director of product|head of product|vp product|vice president product|chief product officer|intern|internship|apm\b|associate product manager|staff product manager)/.test(haystack);
+}
+
+function isLikelyActiveJobPage(text) {
+  const haystack = String(text || "").toLowerCase();
+  if (!haystack) {
+    return false;
+  }
+
+  const staleMarkers = [
+    "job is no longer available",
+    "this job is no longer available",
+    "no longer accepting applications",
+    "position has been filled",
+    "position is filled",
+    "job has expired",
+    "job expired",
+    "page not found",
+    "404",
+    "this posting is no longer available",
+    "sorry this position is no longer posted",
+    "this position is no longer posted",
+    "we can't find the page",
+    "the job you are looking for no longer exists",
+    "not accepting applications",
+    "this job is no longer posted"
+  ];
+
+  return !staleMarkers.some(marker => haystack.indexOf(marker) !== -1);
+}
+
+function extractLocationFromJobText(text, title) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .slice(0, 60);
+
+  const titleLine = String(title || "").trim();
+  if (titleLine) {
+    lines.unshift(titleLine);
+  }
+
+  const locationLine = lines.find(line => /remote|hybrid|onsite|paris|france|london|berlin|munich|amsterdam|dublin|madrid|barcelona|new york|seattle|san francisco|boston|chicago|austin|los angeles|washington|philadelphia|atlanta|maple grove|india|bangalore|bengaluru|mumbai|delhi/i.test(line));
+  return locationLine ? locationLine.slice(0, 120) : "";
+}
+
+function normalizeLocationText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s,/-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isInAcceptableDestination(locationText, acceptableDestinations) {
+  if (!acceptableDestinations || !acceptableDestinations.length) {
+    return true;
+  }
+
+  const normalizedLocation = normalizeLocationText(locationText);
+  if (!normalizedLocation) {
+    return false;
+  }
+
+  return acceptableDestinations.some(destination => {
+    const normalizedDestination = normalizeLocationText(destination);
+    if (!normalizedDestination) {
+      return false;
+    }
+
+    return normalizedLocation.indexOf(normalizedDestination) !== -1;
+  });
+}
+
+function inferLocationText(url, title, text) {
+  return [title, text, url]
+    .map(value => String(value || "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildEmployerJobSearchQuery(employer) {
+  return [
+    `"${employer}"`,
+    `("product manager" OR "senior product manager" OR "group product manager" OR "technical product manager" OR "growth product manager" OR "platform product manager")`,
+    `-intern -internship -"associate product manager" -"principal product manager" -"director of product" -"head of product"`,
+    `"apply" OR "job" OR "careers"`
+  ].join(" ");
+}
+
+function searchSpecificJobsForEmployerWithExa(employer) {
+  try {
+    return fetchExaSearchResults(buildEmployerJobSearchQuery(employer), {
+      type: "auto",
+      numResults: 8,
+      text: false,
+      userLocation: "FR"
+    });
+  } catch (e) {
+    Logger.log(`Exa employer search error for ${employer}: ` + e.message);
+    return [];
+  }
+}
+
+function validateJobCandidatesWithExa(candidateResults, acceptableDestinations) {
+  const validJobs = [];
+  const candidateUrls = candidateResults
+    .filter(result => looksLikeSpecificJobUrl(result.url))
+    .map(result => result.url);
+
+  const resultLookup = candidateResults.reduce((lookup, result) => {
+    lookup[result.url] = result;
+    return lookup;
+  }, {});
+
+  chunkArray(candidateUrls, 10).forEach(urlBatch => {
+    try {
+      fetchExaContents(urlBatch).forEach(contentResult => {
+        const sourceResult = resultLookup[contentResult.url] || {};
+        const text = String(contentResult.text || "");
+        const title = String(sourceResult.title || contentResult.title || "").trim();
+        const employer = String(sourceResult.company || "").trim();
+
+        if (!looksLikeSpecificJobUrl(contentResult.url)) {
+          return;
+        }
+
+        if (!isLikelyActiveJobPage(text)) {
+          return;
+        }
+
+        if (!isRelevantMidLevelProductRole(title, text)) {
+          return;
+        }
+
+        const location = extractLocationFromJobText(text, title);
+        const locationContext = inferLocationText(contentResult.url, title, text);
+        if (!isInAcceptableDestination(location || locationContext, acceptableDestinations)) {
+          return;
+        }
+
+        validJobs.push(normalizeJobPosting({
+          title: title.replace(/\s+\|\s+.*$/, "").trim(),
+          company: employer,
+          location: location,
+          source: getDomainFromUrl(contentResult.url),
+          url: contentResult.url
+        }));
+      });
+    } catch (e) {
+      Logger.log("Exa content validation error: " + e.message);
+    }
+  });
+
+  return validJobs;
+}
+
+function getFeaturedProductJobsWithExa(employers, employerLookup) {
+  try {
+    const uniqueJobs = {};
+    const candidateResults = [];
+    const acceptableDestinations = getAcceptableDestinations();
+
+    employers.forEach(employer => {
+      searchSpecificJobsForEmployerWithExa(employer).forEach(result => {
+        candidateResults.push({
+          title: String(result.title || "").trim(),
+          company: employer,
+          url: String(result.url || "").trim()
+        });
+      });
+    });
+
+    validateJobCandidatesWithExa(candidateResults, acceptableDestinations)
+      .filter(job => isValidFeaturedJob(job, employerLookup))
+      .forEach(job => {
+        const key = [normalizeEmployerName(job.company), job.title, job.url].join("|");
+        if (!uniqueJobs[key] && Object.keys(uniqueJobs).length < 14) {
+          uniqueJobs[key] = job;
+        }
+      });
+
+    return Object.keys(uniqueJobs).map(key => uniqueJobs[key]);
+  } catch (e) {
+    Logger.log("Featured jobs lookup error (Exa): " + e.message);
+    return [];
+  }
+}
+
+function getFeaturedProductJobs() {
+  const employers = getFiveStarEmployers();
+  const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const model = PropertiesService.getScriptProperties().getProperty('GEMINI_MODEL') || 'gemini-2.0-flash';
+  const fallbackModel = PropertiesService.getScriptProperties().getProperty('GEMINI_FALLBACK_MODEL') || 'gemini-2.0-flash-lite';
+
+  if (!employers.length) {
+    Logger.log("Featured jobs skipped: no five-star employers found.");
+    return [];
+  }
+
+  const modelsToTry = [model];
+  if (fallbackModel && fallbackModel !== model) {
+    modelsToTry.push(fallbackModel);
+  }
+
+  const employerLookup = employers.reduce((lookup, employer) => {
+    lookup[normalizeEmployerName(employer)] = true;
+    return lookup;
+  }, {});
+
+  if (!apiKey) {
+    Logger.log("Featured jobs: missing GEMINI_API_KEY. Falling back to Exa.");
+    return getFeaturedProductJobsWithExa(employers, employerLookup);
+  }
+
+  const employerList = employers.map(name => `- ${name}`).join("\n");
+  const prompt = `
+Find up to 14 current product management job openings from this employer list only:
+${employerList}
+
+Search the live web. Prefer official company career pages. If needed, use LinkedIn or Welcome to the Jungle.
+Return JSON only as an array. Do not use markdown fences.
+
+Each item must have:
+- title
+- company
+- location
+- source
+- url
+
+Rules:
+- Include only roles that are clearly product management jobs or close variants such as Product Manager, Senior Product Manager, Group Product Manager, Principal Product Manager, Head of Product, Director of Product, Product Lead, Growth Product Manager, AI Product Manager, Platform Product Manager, Technical Product Manager.
+- Company must exactly match one employer from the list.
+- Use only live postings that appear open now.
+- Prefer unique employers, but multiple jobs per employer are allowed if needed.
+- Keep the total to 14 or fewer items.
+`;
+
+  const payload = {
+    contents: [{
+      parts: [{ text: prompt }]
+    }],
+    tools: [{ google_search: {} }],
+    generationConfig: {
+      temperature: 0.2,
+      topK: 20,
+      topP: 0.9,
+      maxOutputTokens: 4096
+    }
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const currentModel = modelsToTry[i];
+
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`;
+      const response = UrlFetchApp.fetch(url, options);
+
+      if (response.getResponseCode() !== 200) {
+        throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
+      }
+
+      const result = JSON.parse(response.getContentText());
+      const aiText = result.candidates?.[0]?.content?.parts
+        ?.map(part => part.text || "")
+        .join("\n")
+        .trim();
+
+      const uniqueJobs = {};
+
+      extractJsonArray(aiText)
+        .map(normalizeJobPosting)
+        .filter(job => isValidFeaturedJob(job, employerLookup))
+        .forEach(job => {
+          const key = [normalizeEmployerName(job.company), job.title, job.url].join("|");
+          if (!uniqueJobs[key] && Object.keys(uniqueJobs).length < 14) {
+            uniqueJobs[key] = job;
+          }
+        });
+
+      if (Object.keys(uniqueJobs).length) {
+        return Object.keys(uniqueJobs).map(key => uniqueJobs[key]);
+      }
+    } catch (e) {
+      Logger.log(`Featured jobs lookup error (${currentModel}): ` + e.message);
+
+       if (isGeminiQuotaError(e.message)) {
+        Logger.log(`Gemini API quota exhausted (${currentModel}). Falling back to Exa for featured jobs.`);
+        return getFeaturedProductJobsWithExa(employers, employerLookup);
+      }
+    }
+  }
+
+  return [];
+}
+
+function previewFeaturedProductJobs() {
+  const employers = getFiveStarEmployers();
+  const employerLookup = employers.reduce((lookup, employer) => {
+    lookup[normalizeEmployerName(employer)] = true;
+    return lookup;
+  }, {});
+  const jobs = getFeaturedProductJobsWithExa(employers, employerLookup);
+  const output = buildFeaturedJobsPlainText(jobs);
+
+  Logger.log(output);
+  return output;
+}
+
+function previewAcceptableDestinations() {
+  const destinations = getAcceptableDestinations();
+  const output = destinations.join("\n");
+  Logger.log(output);
+  return output;
 }
 
 function updateInterviewOKR(config) {
