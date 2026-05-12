@@ -523,55 +523,84 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
-function formatInlineMarkdown(text) {
-  // Convert markdown bold to HTML bold.
-  return text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-}
+function buildTaskPlanHtml(aiContent) {
+  const TIMED_CARD = [
+    'border-left: 3px solid #2D7DD2;',
+    'padding: 12px 16px;',
+    'margin-bottom: 10px;',
+    'background-color: #f5f9ff;',
+    'border-radius: 0 6px 6px 0;'
+  ].join(' ');
 
-function markdownToHtml(markdown) {
-  const lines = (markdown || "").split(/\r?\n/);
+  const DAILY_CARD = [
+    'border-left: 3px solid #1E8A5E;',
+    'padding: 12px 16px;',
+    'margin-bottom: 10px;',
+    'background-color: #f3fbf7;',
+    'border-radius: 0 6px 6px 0;'
+  ].join(' ');
+
+  const DAILY_BADGE = [
+    'display: inline-block;',
+    'font-size: 10px;',
+    'font-weight: 700;',
+    'text-transform: uppercase;',
+    'letter-spacing: 0.5px;',
+    'background-color: #1E8A5E;',
+    'color: #ffffff;',
+    'padding: 2px 7px;',
+    'border-radius: 10px;',
+    'margin-left: 8px;',
+    'vertical-align: middle;'
+  ].join(' ');
+
+  const lines = (aiContent || "").split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const html = [];
   let inList = false;
 
-  lines.forEach(rawLine => {
-    const line = rawLine.trim();
-
-    if (!line) {
-      if (inList) {
-        html.push("</ul>");
-        inList = false;
-      }
-      return;
-    }
-
+  lines.forEach(line => {
     const headingMatch = line.match(/^###\s+(.*)$/);
-    if (headingMatch) {
-      html.push(`<h3>${formatInlineMarkdown(escapeHtml(headingMatch[1]))}</h3>`);
-      return;
-    }
-
     const bulletMatch = line.match(/^[-*]\s+(.*)$/);
-    if (bulletMatch) {
+
+    if (headingMatch) {
+      if (inList) { html.push("</ul>"); inList = false; }
+      const content = headingMatch[1].trim();
+      const timedMatch = content.match(/^(.+?):\s*(\d+)\s+mins?$/i);
+
+      if (timedMatch) {
+        const name = escapeHtml(timedMatch[1].trim());
+        const mins = timedMatch[2];
+        html.push(
+          `<div style="${TIMED_CARD}">` +
+          `<div style="font-size: 14px; font-weight: 600; color: #1A2744;">${name}</div>` +
+          `<div style="font-size: 12px; color: #8695A3; margin-top: 4px;">${mins} minutes</div>` +
+          `</div>`
+        );
+      } else {
+        const name = escapeHtml(content);
+        html.push(
+          `<div style="${DAILY_CARD}">` +
+          `<div style="font-size: 14px; font-weight: 600; color: #1A2744;">${name}` +
+          `<span style="${DAILY_BADGE}">Daily</span></div>` +
+          `</div>`
+        );
+      }
+    } else if (bulletMatch) {
       if (!inList) {
-        html.push("<ul>");
+        html.push('<ul style="margin: 8px 0 8px 4px; padding-left: 18px; color: #5D6D7E; font-size: 13px;">');
         inList = true;
       }
-      html.push(`<li>${formatInlineMarkdown(escapeHtml(bulletMatch[1]))}</li>`);
-      return;
+      html.push(`<li style="margin-bottom: 4px;">${escapeHtml(bulletMatch[1])}</li>`);
+    } else {
+      if (inList) { html.push("</ul>"); inList = false; }
+      html.push(`<p style="font-size: 13px; color: #5D6D7E; margin: 6px 0;">${escapeHtml(line)}</p>`);
     }
-
-    if (inList) {
-      html.push("</ul>");
-      inList = false;
-    }
-    html.push(`<p>${formatInlineMarkdown(escapeHtml(line))}</p>`);
   });
 
-  if (inList) {
-    html.push("</ul>");
-  }
+  if (inList) html.push("</ul>");
 
-  return html.join("\n");
+  return html.join("\n") ||
+    '<p style="font-size: 13px; color: #8695A3; font-style: italic;">No tasks available today.</p>';
 }
 
 function markdownToPlainText(markdown) {
@@ -591,14 +620,24 @@ function buildUpcomingEventsPlainText(events) {
 
 function buildUpcomingEventsHtml(events) {
   if (!events || !events.length) {
-    return "<p>No calendar events scheduled during your workday.</p>";
+    return '<p style="font-size: 13px; color: #8695A3; font-style: italic;">No calendar events during your workday.</p>';
   }
 
-  return [
-    "<ul>",
-    events.map(event => `<li><strong>${escapeHtml(event.timeLabel)}</strong>: ${escapeHtml(event.title)}</li>`).join("\n"),
-    "</ul>"
-  ].join("\n");
+  return events.map((event, i) => {
+    const border = i < events.length - 1 ? 'border-bottom: 1px solid #f0f3f6;' : '';
+    return (
+      `<div style="padding: 9px 0; ${border}">` +
+      `<table style="border-collapse: collapse; width: 100%;"><tr>` +
+      `<td style="padding: 0; width: 160px; vertical-align: top; white-space: nowrap;">` +
+      `<span style="font-size: 13px; color: #2D7DD2; font-weight: 500;">${escapeHtml(event.timeLabel)}</span>` +
+      `</td>` +
+      `<td style="padding: 0; vertical-align: top;">` +
+      `<span style="font-size: 13px; color: #1A2744;">${escapeHtml(event.title)}</span>` +
+      `</td>` +
+      `</tr></table>` +
+      `</div>`
+    );
+  }).join("\n");
 }
 
 function buildFeaturedJobsPlainText(jobs) {
@@ -620,33 +659,113 @@ function buildFeaturedJobsPlainText(jobs) {
 
 function buildFeaturedJobsHtml(jobs) {
   if (!jobs || !jobs.length) {
-    return "<p>No recent Airtable jobs were found today.</p>";
+    return '<p style="font-size: 13px; color: #8695A3; font-style: italic;">No recent job opportunities found.</p>';
   }
 
-  return [
-    "<ol>",
-    jobs.map(job => {
-      const title = escapeHtml(job.title || "Untitled role");
-      const company = escapeHtml(job.company || "Unknown company");
-      const location = job.location ? `<div>Location: ${escapeHtml(job.location)}</div>` : "";
-      const postDate = job.postDate ? `<div>App Post Date: ${escapeHtml(job.postDate)}</div>` : "";
-      const link = job.url ? `<div>Link: <a href="${escapeHtml(job.url)}">${escapeHtml(job.url)}</a></div>` : "";
+  return jobs.map((job, i) => {
+    const border = i < jobs.length - 1 ? 'border-bottom: 1px solid #f0f3f6;' : '';
+    const title = escapeHtml(job.title || "Untitled role");
+    const company = escapeHtml(job.company || "Unknown company");
+    const locationPart = job.location
+      ? `<span style="color: #8695A3;"> &middot; ${escapeHtml(job.location)}</span>`
+      : "";
+    const postDatePart = job.postDate
+      ? `<span style="color: #8695A3; font-size: 12px; margin-right: 10px;">Posted: ${escapeHtml(job.postDate)}</span>`
+      : "";
+    const linkPart = job.url
+      ? `<a href="${escapeHtml(job.url)}" style="color: #2D7DD2; font-size: 12px; text-decoration: none;">View posting &rarr;</a>`
+      : "";
+    const meta = postDatePart || linkPart
+      ? `<div style="margin-top: 5px;">${postDatePart}${linkPart}</div>`
+      : "";
 
-      return `<li><strong>${title}</strong> - ${company}${location}${postDate}${link}</li>`;
-    }).join("\n"),
-    "</ol>"
+    return (
+      `<div style="padding: 12px 0; ${border}">` +
+      `<div style="font-size: 14px; font-weight: 600; color: #1A2744; margin-bottom: 3px;">${title}</div>` +
+      `<div style="font-size: 13px; color: #5D6D7E;">${company}${locationPart}</div>` +
+      meta +
+      `</div>`
+    );
+  }).join("\n");
+}
+
+function buildEmailHtml(dateLabel, availability, aiContent, featuredJobs) {
+  const S = {
+    wrap: 'font-family: "Helvetica Neue", Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa;',
+    header: 'background-color: #1E3A5F; padding: 28px 32px 20px;',
+    eyebrow: 'color: rgba(255,255,255,0.55); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px;',
+    title: 'color: #ffffff; font-size: 26px; font-weight: 700; line-height: 1.2; margin-bottom: 4px;',
+    date: 'color: rgba(255,255,255,0.65); font-size: 14px;',
+    statsBar: 'background-color: #16304F; padding: 14px 32px;',
+    statsTable: 'border-collapse: collapse; width: 100%;',
+    statsCell: 'color: #ffffff; padding: 0; width: 50%;',
+    statsNum: 'font-size: 24px; font-weight: 700;',
+    statsLabel: 'font-size: 12px; color: rgba(255,255,255,0.6); margin-left: 5px;',
+    body: 'padding: 20px 24px; background-color: #f5f7fa;',
+    card: 'background-color: #ffffff; border-radius: 8px; padding: 20px 24px; margin-bottom: 16px; border: 1px solid #e2e8ef;',
+    sectionLabel: 'font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: #8695A3; margin-bottom: 14px;',
+    tagline: 'text-align: center; padding: 6px 0 4px; color: #8695A3; font-size: 13px; font-style: italic;',
+    footer: 'background-color: #1E3A5F; padding: 14px 32px; text-align: center;',
+    footerText: 'color: rgba(255,255,255,0.4); font-size: 11px;'
+  };
+
+  return [
+    `<div style="${S.wrap}">`,
+
+    `<div style="${S.header}">`,
+    `<div style="${S.eyebrow}">AI Career Coach</div>`,
+    `<div style="${S.title}">Good morning!</div>`,
+    `<div style="${S.date}">${escapeHtml(dateLabel)}</div>`,
+    `</div>`,
+
+    `<div style="${S.statsBar}">`,
+    `<table style="${S.statsTable}"><tr>`,
+    `<td style="${S.statsCell}">`,
+    `<span style="${S.statsNum}">${availability.totalMinutes}</span>`,
+    `<span style="${S.statsLabel}">min free today</span>`,
+    `</td>`,
+    `<td style="${S.statsCell}">`,
+    `<span style="${S.statsNum}">${availability.largestBlock}</span>`,
+    `<span style="${S.statsLabel}">min focus block</span>`,
+    `</td>`,
+    `</tr></table>`,
+    `</div>`,
+
+    `<div style="${S.body}">`,
+
+    `<div style="${S.card}">`,
+    `<div style="${S.sectionLabel}">Today&#39;s Schedule</div>`,
+    buildUpcomingEventsHtml(availability.upcomingEvents),
+    `</div>`,
+
+    `<div style="${S.card}">`,
+    `<div style="${S.sectionLabel}">Priority Tasks</div>`,
+    buildTaskPlanHtml(aiContent),
+    `</div>`,
+
+    `<div style="${S.card}">`,
+    `<div style="${S.sectionLabel}">Featured PM Roles</div>`,
+    buildFeaturedJobsHtml(featuredJobs),
+    `</div>`,
+
+    `<div style="${S.tagline}">Go get &#39;em!</div>`,
+
+    `</div>`,
+
+    `<div style="${S.footer}">`,
+    `<div style="${S.footerText}">AI Career Coach &middot; Google Apps Script</div>`,
+    `</div>`,
+
+    `</div>`
   ].join("\n");
 }
 
 function sendCoachEmail(recipient, aiContent, availability, featuredJobs) {
-  const subjectDate = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MMM d, yyyy");
-  const subject = `Your Daily Career Coach: ${subjectDate}`;
+  const dateLabel = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MMMM d, yyyy");
+  const subject = `Daily Career Coach: ${dateLabel}`;
   const aiPlain = markdownToPlainText(aiContent).trim();
-  const aiHtml = markdownToHtml(aiContent);
   const upcomingEventsPlain = buildUpcomingEventsPlainText(availability.upcomingEvents);
-  const upcomingEventsHtml = buildUpcomingEventsHtml(availability.upcomingEvents);
   const featuredJobsPlain = buildFeaturedJobsPlainText(featuredJobs);
-  const featuredJobsHtml = buildFeaturedJobsHtml(featuredJobs);
 
   const plainBody = [
     "Good morning!",
@@ -667,21 +786,9 @@ function sendCoachEmail(recipient, aiContent, availability, featuredJobs) {
     "Go get 'em!"
   ].join("\n");
 
-  const htmlBody = [
-    "<div style=\"font-family:Arial,sans-serif;line-height:1.5;color:#222;\">",
-    "<p><strong>Good morning!</strong></p>",
-    `<p>Today you have <strong>${availability.totalMinutes} minutes</strong> of white space across your calendars.</p>`,
-    "<p><strong>Coming up on your calendar:</strong></p>",
-    upcomingEventsHtml,
-    "<p>The following are your proposed tasks:</p>",
-    aiHtml,
-    "<p><strong>Most recently created jobs from Airtable:</strong></p>",
-    featuredJobsHtml,
-    "<p>Go get &#39;em!</p>",
-    "</div>"
-  ].join("\n");
-
-  GmailApp.sendEmail(recipient, subject, plainBody, { htmlBody: htmlBody });
+  GmailApp.sendEmail(recipient, subject, plainBody, {
+    htmlBody: buildEmailHtml(dateLabel, availability, aiContent, featuredJobs)
+  });
 }
 
 function getCurrentOKRSheet(config) {
