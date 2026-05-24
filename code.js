@@ -78,7 +78,7 @@ function updateFrenchProgress(config, sheet) {
   const events = calendar.getEvents(yesterdayStart, yesterdayEnd);
   
   let newHours = 0;
-  const keywords = ["FLE", "PMF", "pmf", "Soignant d'aide", "Pâtisserie"];
+  const keywords = ["FLE", "PMF", "pmf", "Soignant d'aide", "Pâtisserie", "Preply", "preply"];
 
   events.forEach(event => {
     const title = event.getTitle();
@@ -97,7 +97,7 @@ function updateFrenchProgress(config, sheet) {
   const idxRun = headers.indexOf("Running Count");
 
   for (let i = 1; i < data.length; i++) {
-    if (data[i][idxKR].toString().includes("Attend hrs of classes / month")) {
+    if (data[i][idxKR].toString().includes("French Courses")) {
       let currentCount = parseFloat(data[i][idxRun]) || 0;
       sheet.getRange(i + 1, idxRun + 1).setValue(currentCount + newHours);
       Logger.log(`Added ${newHours} hours to French OKR. New Total: ${currentCount + newHours}`);
