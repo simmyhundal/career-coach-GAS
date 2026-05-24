@@ -25,7 +25,7 @@ The pipeline runs top-to-bottom in `runDailyCoach()`:
 4. **OKR syncing** (`updateInterviewOKR`) — Before building the plan, the script pulls counts from two Airtable bases and writes them back to the `Running Count` column:
    - Interview prep base (`AIRTABLE_BASE_ID`) — table `Responses`, field `Updated Response Modified This Month`.
    - CRM base (`AIRTABLE_BASE_ID_CRM`) — tables `Meetings` and `Jobs`, using `_CM` suffixed fields for current-month counts.
-5. **French OKR syncing** (`updateFrenchProgress`) — Reads yesterday's default calendar events for keyword matches (`FLE`, `PMF`, etc.) and increments the Running Count for the French classes key result.
+5. **French OKR syncing** (`updateFrenchProgress`) — Reads yesterday's default calendar events for keyword matches (`FLE`, `PMF`, `pmf`, `Soignant d'aide`, `Pâtisserie`, `Preply`, `preply`) and increments the Running Count for the `French Courses` key result.
 6. **AI prioritization** (`prioritizeTasksWithAI`) — Calls Google Gemini API. Primary model from script property `GEMINI_MODEL` (default `gemini-2.0-flash`), fallback to `GEMINI_FALLBACK_MODEL`. If Gemini is unavailable or returns malformed output, `buildFallbackPlan()` runs a deterministic local fallback. The AI output is validated via `hasValidStructuredTasks()` — responses must use `### Task Name: X mins` or `### Task Name` headings exactly matching OKR task names.
 7. **Email** (`sendCoachEmail`) — Sends both plain-text and HTML versions via `GmailApp`. Markdown is converted to HTML inline; HTML is never constructed from unescaped user data.
 
@@ -51,4 +51,67 @@ All secrets live in **GAS Project Settings > Script Properties** — never in co
 - **OKR task names are load-bearing:** The AI prompt instructs Gemini to use exact task names from the OKR sheet. `hasValidStructuredTasks()` enforces this — any mismatch triggers the fallback plan. When renaming OKR rows in the sheet, no code changes are needed, but be aware the AI prompt uses whatever strings are in the sheet.
 - **`_CM` fields drive OKR sync:** Airtable fields with `_CM` suffixes represent current-month computed counts. The script reads these as numbers and writes them to `Running Count` in the OKR sheet. The Airtable formula logic for `_CM` fields lives in Airtable itself, not here.
 - **Airtable pagination:** `fetchAirtableRecords()` handles Airtable's `offset`-based pagination automatically. All filtered queries (interview responses) use a separate `filterByFormula` fetch, while full record sets are fetched unfiltered for aggregation.
-- **README is partially stale:** The README references OpenAI/GPT-4o, but the code uses Google Gemini. The README's architecture section reflects an earlier version.
+- **KR name changes break OKR sync silently.** Both `updateFrenchProgress` and `updateInterviewOKR` use `.includes()` string matching against the `Key Results` column. When a KR is renamed in the sheet, update the matching string in code and push via `clasp push`.
+
+## GitHub Workflow
+
+**Every piece of work completed in this repo — bug fixes, features, refactors — must have a corresponding GitHub issue.** Create the issue at the end of the session (or before starting, for planned work) using the `gh` CLI.
+
+### Issue checklist
+
+1. **Check for an existing issue first:** `gh issue list --state open` — avoid duplicates.
+2. **Create the issue** with:
+   - A clear title: `Bug:` / `Feature:` / `Chore:` prefix
+   - Body sections: **Problem**, **Fix** (or **Approach**), **Acceptance Criteria** (checkboxes)
+   - Labels: one type (`bug` / `enhancement` / `maintenance`) + one domain (`data-sync`, etc.) + one priority (`priority:high/medium/low`)
+   - Milestone: assign to the most relevant existing milestone; if none fits, create one (`gh api repos/simmyhundal/career-coach-GAS/milestones --method POST --field title="..."`)
+3. **Add to the project board** and set the **Estimate** field (numeric story points):
+
+```bash
+# 1. Get the issue node ID
+ISSUE_ID=$(gh api repos/simmyhundal/career-coach-GAS/issues/<N> --jq '.node_id')
+
+# 2. Add to the Career Coach - GAS project (ID: PVT_kwHOBiThXs4BQ47E)
+ITEM_ID=$(gh api graphql -f query="
+mutation {
+  addProjectV2ItemById(input: {projectId: \"PVT_kwHOBiThXs4BQ47E\", contentId: \"$ISSUE_ID\"}) {
+    item { id }
+  }
+}" --jq '.data.addProjectV2ItemById.item.id')
+
+# 3. Set Estimate (field ID: PVTF_lAHOBiThXs4BQ47Ezg-4RKY)
+gh api graphql -f query="
+mutation {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: \"PVT_kwHOBiThXs4BQ47E\",
+    itemId: \"$ITEM_ID\",
+    fieldId: \"PVTF_lAHOBiThXs4BQ47Ezg-4RKY\",
+    value: { number: <POINTS> }
+  }) {
+    projectV2Item { id }
+  }
+}"
+```
+
+### Story point scale
+
+| Points | Effort |
+|--------|--------|
+| 1 | ≤ 30 min |
+| 2 | ~2 hours |
+| 3 | ~half day |
+| 5 | ~full day |
+| 8 | multi-day |
+| 13 | week+ |
+
+### Milestones
+
+Milestones are **epics, not sprints** — they group issues by theme and stay open until all issues are resolved.
+
+| Milestone | Theme |
+|-----------|-------|
+| OKR Sync Accuracy | Reliable data flowing into OKR Running Counts |
+| Relevant Tasks are listed in Daily Email | Email content quality and completeness |
+| Filter Applicable Key Results to be included in Daily Task List | OKR filtering and task selection logic |
+
+Create a new milestone when work doesn't fit an existing theme.

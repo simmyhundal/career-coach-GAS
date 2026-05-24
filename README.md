@@ -1,48 +1,146 @@
-# 🚀 AI Daily Career Coach (v1.0 - Google Apps Script)
+# 🚀 AI Daily Career Coach (Google Apps Script)
 
-An agentic daily planning system that bridges Google Calendar availability with Monthly OKR progress to deliver a personalized, high-leverage "Daily Action Plan" via email.
+An agentic daily planning system that bridges Google Calendar availability with monthly OKR progress to deliver a personalized, high-leverage action plan via email each morning.
 
 ## 📌 Project Overview
-The goal of this project is to eliminate decision fatigue in the morning. Instead of looking at a long list of OKRs and a busy calendar, this script:
-1.  **Analyzes** multiple Google Calendars to find "White Space."
-2.  **Fetches** active OKRs from a Google Sheet.
-3.  **Prioritizes** tasks using OpenAI based on the "Running Count" (progress) vs. "Goal" (target).
-4.  **Delivers** a curated plan directly to Gmail.
+
+The goal is to eliminate decision fatigue. Instead of staring at a long OKR sheet and a busy calendar, this script:
+
+1. **Analyzes** multiple Google Calendars to find available "White Space."
+2. **Syncs** OKR running counts from Airtable (interview prep, CRM) and Google Calendar (French classes).
+3. **Prioritizes** tasks using Google Gemini based on effort remaining vs. calendar availability.
+4. **Delivers** a curated HTML + plain-text plan to Gmail by 8 AM.
+
+---
 
 ## 🏗 System Architecture
-- **Environment:** Google Apps Script (GAS)
-- **Data Sources:** - Google Sheets API (OKR tracking)
-  - Google Calendar API (Free/Busy checking across 6+ calendars)
-- **AI Engine:** OpenAI API (GPT-4o)
-- **Configuration:** Externalized `Agent_Config` sheet for modularity.
+
+| Layer | Technology |
+|-------|-----------|
+| Runtime | Google Apps Script (V8) |
+| OKR data | Google Sheets (`Mon_YY` tab per month) |
+| Calendar data | Google Calendar API (free/busy across multiple calendars) |
+| CRM & job data | Airtable REST API (interview prep base + CRM base) |
+| AI engine | Google Gemini (`gemini-2.0-flash`, with lite fallback) |
+| Email delivery | GmailApp (HTML + plain-text) |
+| Secrets | GAS Script Properties (never in code) |
+
+### Pipeline (`runDailyCoach`)
+
+```
+Config (Sheet2)
+  → updateFrenchProgress   — calendar keyword scan → OKR Running Count
+  → updateInterviewOKR     — Airtable counts → OKR Running Count
+  → getDailyAvailability   — free/busy → totalMinutes + largestBlock
+  → getActiveOKRs          — OKR sheet → task list
+  → prioritizeTasksWithAI  — Gemini → ranked plan (fallback: deterministic)
+  → getFeaturedProductJobs — Airtable CRM → 5 unsent job postings
+  → sendCoachEmail         — Gmail HTML + plain-text
+```
 
 ---
-
-## 🛠 Features & Current Logic
-- **Modular Config:** All IDs (Calendars, Sheets) and Work Hours are pulled from a central config file.
-- **Security:** API Keys are stored in `Script Properties` (Environment Secrets) rather than hardcoded.
-- **Focus Detection:** The script identifies the "Largest Contiguous Block" of time to suggest deep-work tasks.
 
 ## 🚀 Installation & Setup
-1.  **Repo Structure:** Copy the `.gs` files into your Google Apps Script editor.
-2.  **Enable Services:** Enable the **Google Sheets**, **Gmail**, and **Google Calendar** APIs in the GAS sidebar.
-3.  **Secrets:** Add your `LLM_API_KEY` to **Project Settings > Script Properties**.
-4.  **Triggers:** Set a manual **Time-Driven Trigger** to run `runDailyCoach` every morning between 7:00 AM - 8:00 AM.
+
+1. **Clone & push:** `clasp push` syncs `code.js` and `appsscript.json` to your GAS project.
+2. **Enable services** in the GAS editor sidebar: Google Sheets API v4, Google Calendar API v3.
+3. **Script Properties:** Add all keys listed in the table below under *Project Settings → Script Properties*.
+4. **OKR sheet tab:** Create a tab named `Mon_YY` (e.g. `May_26`) in your OKR Google Sheet before the 1st of each month.
+5. **Trigger:** Set a time-driven trigger on `runDailyCoach` to fire daily between 7–8 AM.
+
+### Script Properties (Secrets)
+
+| Key | Purpose |
+|-----|---------|
+| `GEMINI_API_KEY` | Google Gemini API key |
+| `GEMINI_MODEL` | Primary model (default: `gemini-2.0-flash`) |
+| `GEMINI_FALLBACK_MODEL` | Fallback model (default: `gemini-2.0-flash-lite`) |
+| `AIRTABLE_PAT` | Airtable Personal Access Token |
+| `AIRTABLE_BASE_ID` | Interview prep Airtable base |
+| `AIRTABLE_BASE_ID_CRM` | CRM Airtable base (jobs + meetings) |
+| `AIRTABLE_TABLE_NAME` | Interview responses table (default: `Responses`) |
+| `AIRTABLE_TABLE_NAME_JOBS` | Jobs table (default: `Jobs`) |
+| `AIRTABLE_TABLE_NAME_MEETINGS` | Meetings table (default: `Meetings`) |
 
 ---
 
-## 📋 Roadmap & Milestones (v1.0)
-- [x] **Core Integration:** Connect Calendar + Sheets + OpenAI.
-- [ ] **High Priority: Reliability Fix:** Resolve silent failures of the morning trigger.
-- [ ] **Feature: Progress-Awareness:** Update logic to calculate `Target - Running Count` to prioritize lagging goals.
-- [ ] **UI/UX: Human-Readable Email:** Refactor the email output from plain text to a clean HTML/CSS template.
+## 🗂 Project Management
 
-## 🐛 Known Issues & Bugs
-- **Trigger Reliability:** Current GAS triggers intermittently fail to send the daily email.
-- **Date Formatting:** Sheets occasionally passes a `Date Object` for work hours instead of a `String`, requiring a type-check fix.
-- **Readability:** The AI response is currently raw text and lacks visual hierarchy in the email body.
+All feature work and bug fixes are tracked as **GitHub Issues** on this repo, managed via the [Career Coach - GAS](https://github.com/users/simmyhundal/projects/4) project board.
+
+### Milestones = Epics
+
+Milestones group issues by theme rather than by time box. A milestone is closed when all its issues are resolved. Current milestones:
+
+| Milestone | Purpose |
+|-----------|---------|
+| OKR Sync Accuracy | Correct, reliable data flowing into OKR Running Counts |
+| Relevant Tasks are listed in Daily Email | Email content quality and completeness |
+| Filter Applicable Key Results to be included in Daily Task List | OKR filtering and task selection logic |
+
+New milestones are created when work doesn't fit an existing theme.
+
+### Story Points (Estimate field)
+
+Effort is tracked via the **Estimate** numeric field on the project board. Use this scale:
+
+| Points | Effort |
+|--------|--------|
+| 1 | ≤ 30 min |
+| 2 | ~2 hours |
+| 3 | ~half day |
+| 5 | ~full day |
+| 8 | multi-day |
+| 13 | week+ |
+
+### Labels
+
+| Label | Meaning |
+|-------|---------|
+| `bug` | Something broken that was previously working |
+| `enhancement` | New feature or improvement |
+| `maintenance` | Keeps existing features working (refactor, rename fix, etc.) |
+| `data-sync` | OKR / Airtable / Calendar data pipeline |
+| `priority:high` | Blocking or high user impact |
+| `priority:medium` | Important, not urgent |
+| `priority:low` | Nice to have |
+
+### Velocity
+
+Velocity = sum of **Estimate** points closed in a given week, visible by filtering the project board by closed date. Use this to calibrate how many points to take on per week.
+
+### Prioritization
+
+- `priority:high` bugs jump the queue automatically.
+- For enhancements: rank by **Impact ÷ Estimate** — high impact, low effort goes first.
+- Groom the backlog column briefly each week.
 
 ---
 
-## ✍️ Maintenance
-- **Monthly Update:** On the 1st of every month, update the `OKR_TAB_NAME` in your `Agent_Config` sheet (e.g., from `Mar_26` to `Apr_26`).
+## 🛠 Development Workflow
+
+```bash
+# Edit code locally, then sync to GAS
+clasp push
+
+# Test the full pipeline (sends a real email)
+# → Run runDailyCoach() in the GAS editor
+
+# Test Airtable job fetching only
+# → Run previewFeaturedProductJobs() in the GAS editor
+
+# Test French OKR sync only
+# → Run updateFrenchProgress() in the GAS editor
+```
+
+### Monthly maintenance
+
+On the 1st of each month, create a new tab in the OKR Google Sheet named `Mon_YY` (e.g. `Jun_26`). The script will silently abort if the tab is missing.
+
+---
+
+## ⚠️ Key Invariants
+
+- **OKR task names are load-bearing.** Gemini is instructed to use exact names from the sheet. Renaming a key result in the sheet requires no code change, but the new name takes effect immediately — including in `updateFrenchProgress` and `updateInterviewOKR` row lookups.
+- **`_CM` fields drive Airtable sync.** Current-month counts live in Airtable formula fields suffixed `_CM`. The script reads these as numbers; the formula logic lives entirely in Airtable.
+- **Airtable pagination is handled.** `fetchAirtableRecords()` follows `offset` tokens automatically.
