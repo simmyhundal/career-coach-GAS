@@ -959,27 +959,32 @@ function previewFeaturedProductJobs() {
 
 function updateInterviewOKR(config) {
   const pat = PropertiesService.getScriptProperties().getProperty('AIRTABLE_PAT');
-  const baseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID'); 
+  const baseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID');
   const tableName = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME') || "Responses";
+  const starTableName = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_STAR') || "STAR+";
   const crmBaseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID_CRM');
   const crmMeetingsTable = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_MEETINGS') || "Meetings";
   const crmJobsTable = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_JOBS') || "Jobs";
 
   try {
-    // Fetch all response records (paginated) once, then derive all counts from this set.
+    // --- Responses table: records modified this month ---
     const allResponseRecords = fetchAirtableRecords(baseId, tableName, pat);
 
-    // Count records where "Updated Response Modified This Month" is boolean true.
-    // Counting from the already-paginated set avoids the 100-record Airtable page cap
-    // that the old single-page filtered API call was subject to.
+    // "Updated Response Modified This Month" is a formula field returning a number (0 or 1).
+    // Count records where it is non-zero.
     const count = allResponseRecords.filter(r =>
-      r.fields?.["Updated Response Modified This Month"] === true
+      (Number(r.fields?.["Updated Response Modified This Month"]) || 0) > 0
     ).length;
 
     const responseCmSum = allResponseRecords.reduce((total, record) => {
       return total + (Number(record.fields?.Response_CM) || 0);
     }, 0);
-    Logger.log(`Airtable Sync: Found ${count} updated responses (from ${allResponseRecords.length} total). Response_CM sum=${responseCmSum}.`);
+    Logger.log(`Airtable Sync: Found ${count} responses updated this month (from ${allResponseRecords.length} total). Response_CM sum=${responseCmSum}.`);
+
+    // --- STAR+ table: count fully completed stories (Done? = "yes") ---
+    const starRecords = fetchAirtableRecords(baseId, starTableName, pat);
+    const starDoneCount = starRecords.filter(r => r.fields?.["Done?"] === "yes").length;
+    Logger.log(`STAR+ Sync: ${starRecords.length} total stories, ${starDoneCount} marked Done.`);
 
     const sheet = getCurrentOKRSheet(config);
     if (!sheet) {
@@ -987,7 +992,7 @@ function updateInterviewOKR(config) {
     }
 
     updateRunningCountForKeyResult(sheet, "responses to common interview questions", count);
-    updateRunningCountForKeyResult(sheet, "Establish STAR Behavioral Interview Responses", count);
+    updateRunningCountForKeyResult(sheet, "Establish STAR Behavioral Interview Responses", starDoneCount);
     updateRunningCountForKeyResult(sheet, "Record responses to common interview questions and receive feedback from GenAI", responseCmSum);
 
     if (!crmBaseId) {
