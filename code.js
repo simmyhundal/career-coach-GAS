@@ -818,21 +818,28 @@ function updateRunningCountForKeyResult(sheet, keyResultText, runningCount) {
     return false;
   }
 
+  const searchText = keyResultText.trim();
   let updatedRows = 0;
 
   for (let i = 1; i < rows.length; i++) {
-    if (rows[i][idxKR].toString().includes(keyResultText)) {
+    const cellText = rows[i][idxKR].toString().trim();
+    if (cellText.includes(searchText)) {
       sheet.getRange(i + 1, idxRun + 1).setValue(runningCount);
-      Logger.log(`Spreadsheet Updated: row ${i + 1} for '${keyResultText}' set to ${runningCount}.`);
+      Logger.log(`Spreadsheet Updated: row ${i + 1} ("${cellText}") for '${searchText}' set to ${runningCount}.`);
       updatedRows++;
     }
   }
 
   if (updatedRows > 0) {
+    Logger.log(`updateRunningCountForKeyResult: updated ${updatedRows} row(s) for '${searchText}'.`);
     return true;
   }
 
-  Logger.log(`Warning: Could not find a matching Key Result row for '${keyResultText}'.`);
+  // Log all non-empty KR values in the sheet to help diagnose mismatches.
+  const allKRValues = rows.slice(1)
+    .map(r => r[idxKR].toString().trim())
+    .filter(v => v.length > 0);
+  Logger.log(`Warning: No matching row found for '${searchText}'. KR values in sheet: ${JSON.stringify(allKRValues)}`);
   return false;
 }
 
@@ -954,35 +961,25 @@ function updateInterviewOKR(config) {
   const pat = PropertiesService.getScriptProperties().getProperty('AIRTABLE_PAT');
   const baseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID'); 
   const tableName = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME') || "Responses";
-  const fieldName = "Updated Response Modified This Month";
   const crmBaseId = PropertiesService.getScriptProperties().getProperty('AIRTABLE_BASE_ID_CRM');
   const crmMeetingsTable = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_MEETINGS') || "Meetings";
   const crmJobsTable = PropertiesService.getScriptProperties().getProperty('AIRTABLE_TABLE_NAME_JOBS') || "Jobs";
-  
-  // 1. Updated Filter Syntax based on successful debug test
-  const filter = `({${fieldName}} = TRUE())`;
-  const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}?filterByFormula=${encodeURIComponent(filter)}`;
-  
-  const options = {
-    "method": "get",
-    "headers": { "Authorization": "Bearer " + pat },
-    "muteHttpExceptions": true
-  };
 
   try {
-    const response = UrlFetchApp.fetch(url, options);
-    if (response.getResponseCode() !== 200) {
-      throw new Error(`HTTP ${response.getResponseCode()}: ${response.getContentText()}`);
-    }
-    const data = JSON.parse(response.getContentText());
+    // Fetch all response records (paginated) once, then derive all counts from this set.
     const allResponseRecords = fetchAirtableRecords(baseId, tableName, pat);
-    
-    // Total count of records marked 'True' this month
-    const count = data.records ? data.records.length : 0;
+
+    // Count records where "Updated Response Modified This Month" is boolean true.
+    // Counting from the already-paginated set avoids the 100-record Airtable page cap
+    // that the old single-page filtered API call was subject to.
+    const count = allResponseRecords.filter(r =>
+      r.fields?.["Updated Response Modified This Month"] === true
+    ).length;
+
     const responseCmSum = allResponseRecords.reduce((total, record) => {
       return total + (Number(record.fields?.Response_CM) || 0);
     }, 0);
-    Logger.log(`Airtable Sync: Found ${count} updated responses. Response_CM sum across all records=${responseCmSum}.`);
+    Logger.log(`Airtable Sync: Found ${count} updated responses (from ${allResponseRecords.length} total). Response_CM sum=${responseCmSum}.`);
 
     const sheet = getCurrentOKRSheet(config);
     if (!sheet) {
