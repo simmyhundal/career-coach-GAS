@@ -35,9 +35,10 @@ function runDailyCoach() {
   }
 
   // --- NEW STEP ---
-  // 2.1 Update French progress from yesterday's calendar and Interview Prep from Airtable
-  updateFrenchProgress(config, sheet); // From Calendar
-  updateInterviewOKR(config);   // From Airtable
+  // 2.1 Update OKR running counts from external sources
+  updateFrenchProgress(config, sheet);    // French course hours from Calendar
+  updateFrenchJournalOKR(config, sheet);  // French journal entry count from Google Doc
+  updateInterviewOKR(config);             // Interview prep counts from Airtable
   // ----------------
 
   // 2.2 Calculate White Space
@@ -103,6 +104,93 @@ function updateFrenchProgress(config, sheet) {
       Logger.log(`Added ${newHours} hours to French OKR. New Total: ${currentCount + newHours}`);
       break;
     }
+  }
+}
+
+/**
+ * Standalone runner for updateFrenchJournalOKR — loads config from the
+ * active spreadsheet so the function can be triggered directly from the
+ * GAS editor without passing arguments.
+ */
+function runFrenchJournalOKR() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const configSheet = ss.getSheetByName("Sheet2");
+  if (!configSheet) { Logger.log("Could not find Sheet2 for config."); return; }
+  const configData = configSheet.getRange("B2:C10").getValues();
+  const config = {};
+  configData.forEach(row => { config[row[0]] = row[1]; });
+  updateFrenchJournalOKR(config);
+}
+
+/**
+ * Counts H1 headings in the French journal Google Doc tab that contain the
+ * current French month name (e.g. "mai 1", "mai 27") and writes the total
+ * to the "Journal 2+ sentences in French" OKR Running Count.
+ *
+ * Doc ID and tab ID are read from script properties (JOURNAL_DOC_ID,
+ * JOURNAL_TAB_ID) with hardcoded defaults so no property setup is required.
+ */
+function updateFrenchJournalOKR(config, sheet) {
+  const FRENCH_MONTHS = [
+    "janvier", "février", "mars", "avril", "mai", "juin",
+    "juillet", "août", "septembre", "octobre", "novembre", "décembre"
+  ];
+
+  // Accept sheet from the caller (runDailyCoach) or look it up when run standalone.
+  if (!sheet) {
+    sheet = getCurrentOKRSheet(config);
+    if (!sheet) return;
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const docId  = props.getProperty('JOURNAL_DOC_ID')  || "1OQMDDuSLubv91YeincZ7Jtx-xkKRzdv6gSTJJTk-txI";
+  // GAS tab IDs use the "t.XXX" prefix form seen in the document API (not the bare URL form).
+  const tabId  = props.getProperty('JOURNAL_TAB_ID')  || "t.m1y7ffcdjs6m";
+
+  const currentMonth = FRENCH_MONTHS[new Date().getMonth()]; // e.g. "mai"
+
+  try {
+    const doc = DocumentApp.openById(docId);
+
+    // GAS tab IDs may differ from the URL format (e.g. "t.XXX" vs "XXX").
+    // Try the stored ID first, then search all tabs for a match.
+    let tab = doc.getTab(tabId);
+    if (!tab) {
+      const allTabs = doc.getTabs();
+      Logger.log(`getTab("${tabId}") returned null. Available tabs (${allTabs.length}): `
+        + allTabs.map(t => `id="${t.getId()}" title="${t.getTitle()}"`).join(" | "));
+      tab = allTabs.find(t =>
+        t.getId() === tabId ||
+        t.getId() === "t." + tabId ||
+        t.getId().replace(/^t\./, "") === tabId
+      ) || null;
+    }
+
+    if (!tab) {
+      Logger.log(`French Journal Sync Error: No tab matched "${tabId}". Check log above for available IDs.`);
+      return;
+    }
+
+    const body = tab.asDocumentTab().getBody();
+
+    let count = 0;
+    for (let i = 0; i < body.getNumChildren(); i++) {
+      const child = body.getChild(i);
+      if (child.getType() !== DocumentApp.ElementType.PARAGRAPH) continue;
+      const para = child.asParagraph();
+      if (para.getHeading() !== DocumentApp.ParagraphHeading.HEADING1) continue;
+      const text = para.getText().toLowerCase();
+      if (text.includes(currentMonth)) {
+        count++;
+        Logger.log(`French Journal: H1 counted — "${para.getText()}"`);
+      }
+    }
+
+    Logger.log(`French Journal Sync: ${count} H1 entries for '${currentMonth}'.`);
+    updateRunningCountForKeyResult(sheet, "Journal 2+ sentences in French", count);
+
+  } catch (e) {
+    Logger.log("French Journal Sync Error: " + e.message);
   }
 }
 
@@ -699,7 +787,7 @@ function buildEmailHtml(dateLabel, availability, aiContent, featuredJobs) {
     statsBar: 'background-color: #16304F; padding: 14px 32px;',
     statsTable: 'border-collapse: collapse; width: 100%;',
     statsCell: 'color: #ffffff; padding: 0; width: 50%;',
-    statsNum: 'font-size: 24px; font-weight: 700;',
+    statsNum: 'font-size: 18px; font-weight: 700;',
     statsLabel: 'font-size: 12px; color: rgba(255,255,255,0.6); margin-left: 5px;',
     body: 'padding: 20px 24px; background-color: #f5f7fa;',
     card: 'background-color: #ffffff; border-radius: 8px; padding: 20px 24px; margin-bottom: 16px; border: 1px solid #e2e8ef;',
@@ -714,7 +802,6 @@ function buildEmailHtml(dateLabel, availability, aiContent, featuredJobs) {
 
     `<div style="${S.header}">`,
     `<div style="${S.eyebrow}">AI Career Coach</div>`,
-    `<div style="${S.title}">Good morning!</div>`,
     `<div style="${S.date}">${escapeHtml(dateLabel)}</div>`,
     `</div>`,
 
