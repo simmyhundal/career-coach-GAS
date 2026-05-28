@@ -2,6 +2,9 @@
 
 An agentic daily planning system that bridges Google Calendar availability with monthly OKR progress to deliver a personalized, high-leverage action plan via email each morning.
 
+<img width="865" height="610" alt="image" src="https://github.com/user-attachments/assets/756cedbf-e0f4-4692-9018-90250793451e" />
+
+
 ## 📌 Project Overview
 
 The goal is to eliminate decision fatigue. Instead of staring at a long OKR sheet and a busy calendar, this script:
