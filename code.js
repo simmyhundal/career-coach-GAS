@@ -61,50 +61,37 @@ function runDailyCoach() {
  * Updates the French OKR running count based on yesterday's calendar events.
  */
 function updateFrenchProgress(config, sheet) {
-  // const ss = SpreadsheetApp.getActiveSpreadsheet();
-  // const okrSheet = SpreadsheetApp.openById(config.OKR_SHEET_ID).getSheetByName(config.OKR_TAB_NAME);
-  
-  // 1. Define Yesterday's Range
-  let yesterdayStart = new Date();
-  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-  yesterdayStart.setHours(0, 0, 0, 0);
-  
-  let yesterdayEnd = new Date();
+  const keywords = ["FLE", "PMF", "pmf", "Soignant d'aide", "Pâtisserie", "Preply", "preply"];
+
+  // Recalculate from the start of the current month through yesterday so this
+  // function is idempotent — running it multiple times on the same day always
+  // produces the same result rather than accumulating double-counts.
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+
+  const yesterdayEnd = new Date(now);
   yesterdayEnd.setDate(yesterdayEnd.getDate() - 1);
   yesterdayEnd.setHours(23, 59, 59, 999);
 
-  // 2. Fetch Events from your Main Calendar
-  // Assuming 'primary' or the specific ID for your French/Life calendar
-  const calendar = CalendarApp.getDefaultCalendar(); 
-  const events = calendar.getEvents(yesterdayStart, yesterdayEnd);
-  
-  let newHours = 0;
-  const keywords = ["FLE", "PMF", "pmf", "Soignant d'aide", "Pâtisserie", "Preply", "preply"];
+  if (yesterdayEnd < monthStart) {
+    Logger.log("French Progress: no completed days in this month yet, skipping.");
+    return;
+  }
 
+  const calendar = CalendarApp.getDefaultCalendar();
+  const events = calendar.getEvents(monthStart, yesterdayEnd);
+
+  let totalHours = 0;
   events.forEach(event => {
     const title = event.getTitle();
     if (keywords.some(key => title.includes(key))) {
-      let durationInHours = (event.getEndTime() - event.getStartTime()) / (1000 * 60 * 60);
-      newHours += durationInHours;
+      totalHours += (event.getEndTime() - event.getStartTime()) / (1000 * 60 * 60);
     }
   });
 
-  if (newHours === 0) return; // No French classes yesterday, skip update.
+  Logger.log(`French Progress: ${totalHours} hours of French classes from ${monthStart.toDateString()} to yesterday.`);
 
-  // 3. Find the "French Classes" row and update Running Count
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const idxKR = headers.indexOf("Key Results");
-  const idxRun = headers.indexOf("Running Count");
-
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][idxKR].toString().includes("French Courses")) {
-      let currentCount = parseFloat(data[i][idxRun]) || 0;
-      sheet.getRange(i + 1, idxRun + 1).setValue(currentCount + newHours);
-      Logger.log(`Added ${newHours} hours to French OKR. New Total: ${currentCount + newHours}`);
-      break;
-    }
-  }
+  updateRunningCountForKeyResult(sheet, "French Courses", totalHours);
 }
 
 /**
