@@ -897,7 +897,7 @@ function updateRunningCountForKeyResult(sheet, keyResultText, runningCount) {
 
   for (let i = 1; i < rows.length; i++) {
     const cellText = rows[i][idxKR].toString().trim();
-    if (cellText.includes(searchText)) {
+    if (cellText === searchText) {
       sheet.getRange(i + 1, idxRun + 1).setValue(runningCount);
       Logger.log(`Spreadsheet Updated: row ${i + 1} ("${cellText}") for '${searchText}' set to ${runningCount}.`);
       updatedRows++;
