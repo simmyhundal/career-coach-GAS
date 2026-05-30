@@ -1097,12 +1097,20 @@ function updateInterviewOKR(config) {
     const jobsListedSum = jobRecords.reduce((total, record) => {
       return total + (Number(record.fields?.JDCreated_Product_CM) || 0);
     }, 0);
+    const strategyReferralApplicationsSum = jobRecords.reduce((total, record) => {
+      return total + (Number(record.fields?.AppSubmitted_Strategy_ActualReferral_CM) || 0);
+    }, 0);
+    const strategyApplicationsSum = jobRecords.reduce((total, record) => {
+      return total + (Number(record.fields?.AppSubmitted_Strategy_CM) || 0);
+    }, 0);
 
-    Logger.log(`Airtable CRM Jobs Sync: Found ${jobRecords.length} jobs. Referral apps=${referralApplicationsSum}, PM apps=${productApplicationsSum}, PM jobs listed=${jobsListedSum}.`);
+    Logger.log(`Airtable CRM Jobs Sync: Found ${jobRecords.length} jobs. Referral apps=${referralApplicationsSum}, PM apps=${productApplicationsSum}, PM jobs listed=${jobsListedSum}. Strategy referral apps=${strategyReferralApplicationsSum}, Strategy apps=${strategyApplicationsSum}.`);
 
     updateRunningCountForKeyResult(sheet, "Apply to PM jobs that included a referral", referralApplicationsSum);
     updateRunningCountForKeyResult(sheet, "Apply to PM jobs", productApplicationsSum);
     updateRunningCountForKeyResult(sheet, "Find and list PM Jobs", jobsListedSum);
+    updateRunningCountForKeyResult(sheet, "Apply to Consulting jobs that include a referral", strategyReferralApplicationsSum);
+    updateRunningCountForKeyResult(sheet, "Apply to Consulting jobs", strategyApplicationsSum);
 
   } catch (e) {
     Logger.log("Airtable Sync Error: " + e.message);
