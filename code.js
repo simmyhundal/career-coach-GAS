@@ -1081,11 +1081,15 @@ function updateInterviewOKR(config) {
     const practiceInterviewSum = meetingRecords.reduce((total, record) => {
       return total + (Number(record.fields?.Practice_Interview_CM) || 0);
     }, 0);
+    const soloCaseInterviewSum = meetingRecords.reduce((total, record) => {
+      return total + (Number(record.fields?.Solo_Case_Interview_CM) || 0);
+    }, 0);
 
-    Logger.log(`Airtable CRM Sync: Found ${meetingRecords.length} meetings. Clinician sum=${clinicianInterviewSum}, Practice sum=${practiceInterviewSum}.`);
+    Logger.log(`Airtable CRM Sync: Found ${meetingRecords.length} meetings. Clinician sum=${clinicianInterviewSum}, Practice sum=${practiceInterviewSum}, Solo case sum=${soloCaseInterviewSum}.`);
 
     updateRunningCountForKeyResult(sheet, "Establish contact with active clinicians", clinicianInterviewSum);
     updateRunningCountForKeyResult(sheet, "Practice Interviews (case + behavioral ideally)", practiceInterviewSum);
+    updateRunningCountForKeyResult(sheet, "Complete case interviews solo", soloCaseInterviewSum);
 
     const jobRecords = fetchAirtableRecords(crmBaseId, crmJobsTable, pat);
     const referralApplicationsSum = jobRecords.reduce((total, record) => {
