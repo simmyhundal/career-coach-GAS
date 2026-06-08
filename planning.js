@@ -141,7 +141,9 @@ function getActiveOKRs(config, sheet) {
   const idxName = headers.indexOf("Key Results");
   const idxEffort = headers.indexOf("Effort (mins)");
   const idxDaily = headers.indexOf("Daily");
-  const idxCompleted = headers.indexOf("Completed?");
+  const idxCompleted = headers.indexOf("Completed post-Scheduled?") !== -1
+    ? headers.indexOf("Completed post-Scheduled?")
+    : headers.indexOf("Completed?");
 
   const isYes = value => String(value || "").trim().toLowerCase() === "yes";
 
@@ -274,7 +276,7 @@ function buildStructuredTasksMarkdown(taskItems, tasks) {
 /**
  * Uses Google Gemini to prioritize OKR tasks based on available calendar time.
  */
-function prioritizeTasksWithAI(config, availability, tasks) {
+function prioritizeTasksWithAI(availability, tasks) {
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   const model = PropertiesService.getScriptProperties().getProperty('GEMINI_MODEL') || 'gemini-2.0-flash';
   const fallbackModel = PropertiesService.getScriptProperties().getProperty('GEMINI_FALLBACK_MODEL') || 'gemini-2.0-flash-lite';

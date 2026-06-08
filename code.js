@@ -46,7 +46,7 @@ function runDailyCoach() {
   const tasks = getActiveOKRs(config, sheet);
 
   // 4. Get AI Recommendation
-  const aiContent = prioritizeTasksWithAI(config, availability, tasks);
+  const aiContent = prioritizeTasksWithAI(availability, tasks);
 
   // 4.1 Pull the five most recent unsent Airtable jobs
   const featuredJobs = getFeaturedProductJobs();
