@@ -307,7 +307,7 @@ function updateInterviewOKR(config) {
       return;
     }
 
-    updateRunningCountForKeyResult(sheet, "responses to common interview questions", count);
+    updateRunningCountForKeyResult(sheet, "Develop responses to common interview questions", count);
     updateRunningCountForKeyResult(sheet, "Establish STAR Behavioral Interview Responses", starDoneCount);
     updateRunningCountForKeyResult(sheet, "Record responses to common interview questions and receive feedback from GenAI", responseCmSum);
 
