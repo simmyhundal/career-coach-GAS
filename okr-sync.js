@@ -51,7 +51,7 @@ function runFrenchJournalOKR() {
 /**
  * Counts H1 headings in the French journal Google Doc tab that contain the
  * current French month name (e.g. "mai 1", "mai 27") and writes the total
- * to the "Journal 2+ sentences in French" OKR Running Count.
+ * to the "Journal 2+ sentences in French (Mental Health)" OKR Running Count.
  *
  * Doc ID and tab ID are read from script properties (JOURNAL_DOC_ID,
  * JOURNAL_TAB_ID) with hardcoded defaults so no property setup is required.
@@ -109,7 +109,7 @@ function updateFrenchJournalOKR(config, sheet) {
     }
 
     Logger.log(`French Journal Sync: ${count} H1 entries for '${currentMonth}'.`);
-    updateRunningCountForKeyResult(sheet, "Journal 2+ sentences in French", count);
+    updateRunningCountForKeyResult(sheet, "Journal 2+ sentences in French (Mental Health)", count);
 
   } catch (e) {
     Logger.log("French Journal Sync Error: " + e.message);
